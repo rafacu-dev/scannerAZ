@@ -66,7 +66,8 @@ const apiRateLimit = rateLimit({
   limit: 60,
   legacyHeaders: false,
   standardHeaders: true,
-  handler: (_req, res) => {
+  handler: (req, res) => {
+    recordSecurityEvent("security.rate_limited", req, res, { scope: "operator_amazon" });
     res.status(429).json({
       error: "Too many requests. Try again shortly.",
       requestId: res.locals.requestId
@@ -78,7 +79,8 @@ const oauthRateLimit = rateLimit({
   limit: 12,
   legacyHeaders: false,
   standardHeaders: true,
-  handler: (_req, res) => {
+  handler: (req, res) => {
+    recordSecurityEvent("security.rate_limited", req, res, { scope: "amazon_oauth" });
     res.status(429).json({
       error: "Too many authorization attempts. Try again later.",
       requestId: res.locals.requestId
@@ -90,7 +92,8 @@ const accountRateLimit = rateLimit({
   limit: 8,
   legacyHeaders: false,
   standardHeaders: true,
-  handler: (_req, res) => {
+  handler: (req, res) => {
+    recordSecurityEvent("security.rate_limited", req, res, { scope: "scanneraz_account" });
     res.status(429).json({
       error: "Too many account attempts. Try again later.",
       requestId: res.locals.requestId
@@ -103,7 +106,8 @@ const publicTenantRateLimit = rateLimit({
   legacyHeaders: false,
   standardHeaders: true,
   keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
-  handler: (_req, res) => {
+  handler: (req, res) => {
+    recordSecurityEvent("security.rate_limited", req, res, { scope: "tenant_amazon" });
     res.status(429).json({
       error: "Too many product checks. Try again shortly.",
       requestId: res.locals.requestId
@@ -135,9 +139,10 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api/keepa", keepaRouter);
-app.use("/api/amazon", apiRateLimit, requireOperatorAccess, amazonRouter);
+app.use("/api/amazon", markSensitiveResponse, apiRateLimit, requireOperatorAccess, amazonRouter);
 app.use(
   "/api/public/amazon",
+  markSensitiveResponse,
   requirePublicAppAccess,
   requireTenantSession,
   publicTenantRateLimit,
@@ -145,7 +150,7 @@ app.use(
 );
 app.use("/api/retail", retailRouter);
 app.use("/api/retail/target", targetRouter);
-app.use("/auth/amazon", oauthRateLimit);
+app.use("/auth/amazon", markSensitiveResponse, oauthRateLimit);
 
 app.post("/auth/scanneraz/register", requirePublicAppAccess, accountRateLimit, async (req, res, next) => {
   try {
@@ -332,7 +337,7 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
   }
 });
 
-app.get("/connections", requireOperatorAccess, async (_req, res, next) => {
+app.get("/connections", markSensitiveResponse, requireOperatorAccess, async (_req, res, next) => {
   try {
     res.json({ amazon: await listAmazonConnections() });
   } catch (error) {
@@ -348,6 +353,8 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
       requestId: res.locals.requestId,
       method: req.method,
       path: req.path,
+      cfRay: req.get("cf-ray") || undefined,
+      renderRequestId: req.get("rndr-id") || undefined,
       errorName: error instanceof Error ? error.name : "UnknownError"
     })
   );
@@ -412,6 +419,7 @@ function requireOperatorAccess(req: express.Request, res: express.Response, next
   const suppliedToken = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
 
   if (!suppliedToken || !safeEqual(suppliedToken, expectedToken)) {
+    recordSecurityEvent("security.operator_auth_rejected", req, res);
     res.status(401).json({
       error: "Operator authentication is required.",
       requestId: res.locals.requestId
@@ -440,6 +448,38 @@ function isPublicAppReady() {
     usesManagedAmazonConnectionStore() &&
     usesManagedAccountStore() &&
     Boolean(config.ENCRYPTION_KEY && config.SESSION_SECRET)
+  );
+}
+
+function markSensitiveResponse(
+  _req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  res.setHeader("cache-control", "no-store, private, max-age=0");
+  res.setHeader("pragma", "no-cache");
+  res.vary("authorization");
+  res.vary("cookie");
+  next();
+}
+
+function recordSecurityEvent(
+  event: string,
+  req: express.Request,
+  res: express.Response,
+  details: Record<string, string | number | boolean | undefined> = {}
+) {
+  // Trace edge and platform events without writing IPs, tokens, or request bodies.
+  console.warn(
+    JSON.stringify({
+      event,
+      requestId: res.locals.requestId,
+      method: req.method,
+      path: req.path,
+      cfRay: req.get("cf-ray") || undefined,
+      renderRequestId: req.get("rndr-id") || undefined,
+      ...details
+    })
   );
 }
 

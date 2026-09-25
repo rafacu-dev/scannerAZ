@@ -14,6 +14,9 @@ control that is not actually configured and operating.
 
 ## Current repository evidence
 
+- `docs/production-architecture.md` records the deployed data boundary,
+  private database connection, edge protections, and the remaining public
+  launch controls.
 - `docs/security-controls.md` records the implemented application controls and
   the deployment controls still required before launch.
 - `docs/incident-response-plan.md` defines incident roles, containment,
@@ -52,6 +55,11 @@ Complete and retain evidence for every item below.
       tokens.
 - [ ] `SCANNERAZ_OPERATOR_TOKEN` is stored only in the server-side secret
       manager. It is not embedded in Expo or exposed to a browser.
+
+The architecture and source evidence are now documented, but the checklist
+must remain incomplete until the required provider screenshots, monitoring
+configuration, MFA verification, anti-malware review, and tabletop record are
+retained outside source control.
 
 ## Developer Profile response template
 
