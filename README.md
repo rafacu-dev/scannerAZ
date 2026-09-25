@@ -31,9 +31,10 @@ Use these settings:
 The production Blueprint and operational sequence are documented in
 [`render.yaml`](render.yaml) and
 [`docs/render-production-runbook.md`](docs/render-production-runbook.md).
-The Blueprint declares a private dedicated Postgres database, generated
-server-only secrets, and disabled-by-default public Amazon flags. It does not
-put credentials in source control.
+The Blueprint declares a private isolated Postgres database, generated
+server-only secrets, and disabled-by-default public Amazon flags. Its initial
+free database plan is for validation only; it does not put credentials in
+source control.
 
 GitHub Actions verifies types, authentication tests, and the production build
 on `main` and pull requests before a Render deployment is relied upon.

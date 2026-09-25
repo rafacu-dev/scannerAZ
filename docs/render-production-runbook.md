@@ -8,7 +8,8 @@ verified.
 ## Intended production resources
 
 - `scanneraz-api`: Node web service in Render's Oregon region.
-- `scanneraz-db`: PostgreSQL 18 in the same region, with no public ingress.
+- `scanneraz-db`: temporary free PostgreSQL 18 in the same region, with no
+  public ingress.
 - `scanneraz-production-runtime`: an environment group for non-secret
   production switches shared by ScannerAz services.
 
@@ -20,20 +21,19 @@ dashboard before applying it.
 ## Database choice
 
 Use a dedicated database rather than an existing database for another product.
-The initial configuration is intentionally small:
+The initial validation configuration is intentionally small:
 
-- Plan: `0.1c-256mb`.
+- Plan: `free`.
 - Storage: 1 GB.
 - Storage autoscaling: off.
-- Connection pool: PgBouncer.
 - External IP allowlist: empty, so only Render private-network clients can
   connect.
 
-As of September 2026, Render's published pricing lists the `0.1c-256mb`
-Postgres compute plan at $6/month and expandable Postgres storage at
-$0.30/GB-month. The initial configuration should therefore be reviewed as
-about $6.30/month before taxes or later storage changes. Confirm the current
-dashboard total immediately before creation; provider pricing can change.
+Render's free Postgres plan is a short-lived validation resource: it expires
+after 30 days. It must be upgraded to a paid dedicated plan before any public
+Amazon launch, both to preserve the data and to meet the required production
+operating standard. Do not enable public seller connections while it remains
+on the free plan.
 
 ## Environment and secret boundaries
 
@@ -56,19 +56,25 @@ compiled into the mobile application and are visible to users.
 
 ## First deployment checklist
 
-1. Create `scanneraz-db` in Oregon with the database settings above.
-2. Attach `DATABASE_URL` from the database's private connection string to
+1. Upgrade the existing `warasoft` database to Render's smallest paid
+   PostgreSQL plan, preserving its data and freeing the workspace's one free
+   Postgres slot.
+2. Create `scanneraz-db` in Oregon with the free database settings above.
+3. Attach `DATABASE_URL` from the database's private connection string to
    `scanneraz-api`.
-3. Let Render generate `ENCRYPTION_KEY` and `SESSION_SECRET` in its secret
+4. Let Render generate `ENCRYPTION_KEY` and `SESSION_SECRET` in its secret
    manager. Do not export their values to a local file.
-4. Keep both public feature flags `false`; deploy and confirm `/health` returns
+5. Keep both public feature flags `false`; deploy and confirm `/health` returns
    `200`.
-5. Inspect the service logs for successful schema initialization. The service
+6. Inspect the service logs for successful schema initialization. The service
    creates only its `scanneraz_*` tables.
-6. Before enabling seller OAuth, configure the WAF/firewall, threat detection,
+7. Before enabling seller OAuth, configure the WAF/firewall, threat detection,
    endpoint/runtime protection, MFA, incident-response record, and evidence
    listed in `docs/amazon-sp-api-security-remediation.md`.
-7. After the Amazon Developer Profile and app roles are approved, add the LWA
+8. Replace the temporary free `scanneraz-db` plan with a paid dedicated plan
+   before its 30-day expiration and before submitting the Amazon public-app
+   security profile.
+9. After the Amazon Developer Profile and app roles are approved, add the LWA
    variables in Render's secret manager, configure the verified OAuth callback,
    and perform a limited pilot before changing the public flags.
 

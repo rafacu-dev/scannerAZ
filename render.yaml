@@ -49,11 +49,11 @@ databases:
     user: scanneraz
     region: oregon
     postgresMajorVersion: "18"
-    # Smallest non-expiring Render Postgres compute tier.
-    plan: 0.1c-256mb
+    # Temporary validation database. Render's free Postgres plan expires after
+    # 30 days; upgrade before any production Amazon launch.
+    plan: free
     diskSizeGB: 1
     storageAutoscalingEnabled: false
-    connectionPool: pgbouncer
     # No public database ingress: scanneraz-api connects through Render's
     # private network using DATABASE_URL above.
     ipAllowList: []
