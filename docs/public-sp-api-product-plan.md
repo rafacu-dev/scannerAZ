@@ -36,16 +36,17 @@ until a specific product feature needs them and its security review is complete.
 
 ## Current implementation and required work
 
-The backend already has a signed OAuth state flow, AES-256-GCM refresh-token
-encryption, a PostgreSQL connection store, and connection IDs. It is currently
-an operator-only bootstrap integration, not a customer-facing multi-tenant
-authorization system.
+The backend has a signed OAuth state flow, AES-256-GCM refresh-token
+encryption, a PostgreSQL connection store, and connection IDs. It also now has
+the backend foundation for ScannerAz user accounts, password hashing,
+tenant-scoped sessions, tenant-bound OAuth state, and tenant-scoped connection
+and listing-restriction routes. This public surface is disabled by default and
+cannot operate in production without a managed database.
 
 Before external sellers can use ScannerAz, implement:
 
-- ScannerAz end-user authentication and user-to-tenant membership.
-- A tenant ID and ownership rules for every Amazon connection and API request.
-- A secure connection-management screen with connect, status, and disconnect.
+- The Expo account, sign-in, connection-management, and disconnect screens.
+- Email verification, password-reset, and account-recovery workflows.
 - Authorization event logs that exclude tokens and credentials.
 - Rate limits and quotas per tenant, seller account, and feature.
 - Consent, privacy, support, terms, and data-deletion pages on the public

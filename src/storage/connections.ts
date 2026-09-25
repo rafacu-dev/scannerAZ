@@ -6,6 +6,7 @@ import { decryptSecret, encryptSecret } from "../security/crypto.js";
 
 export type AmazonConnection = {
   id: string;
+  tenantId?: string;
   sellerId?: string;
   marketplaceId: string;
   refreshToken: string;
@@ -18,6 +19,7 @@ type StoredAmazonConnection = Omit<AmazonConnection, "refreshToken"> & {
 
 type DatabaseConnectionRow = {
   id: string;
+  tenant_id: string | null;
   seller_id: string | null;
   marketplace_id: string;
   encrypted_refresh_token: string;
@@ -58,11 +60,18 @@ export async function initializeAmazonConnectionStore() {
     .query(`
       CREATE TABLE IF NOT EXISTS scanneraz_amazon_connections (
         id TEXT PRIMARY KEY,
+        tenant_id TEXT,
         seller_id TEXT,
         marketplace_id TEXT NOT NULL,
         encrypted_refresh_token TEXT NOT NULL,
         connected_at TIMESTAMPTZ NOT NULL
-      )
+      );
+
+      ALTER TABLE scanneraz_amazon_connections
+      ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+
+      CREATE INDEX IF NOT EXISTS scanneraz_amazon_connections_tenant_id_idx
+      ON scanneraz_amazon_connections (tenant_id, connected_at DESC);
     `)
     .then(() => undefined)
     .catch((error: unknown) => {
@@ -109,6 +118,7 @@ function writeLocalConnections(connections: StoredAmazonConnection[]) {
 function toStoredConnection(connection: AmazonConnection): StoredAmazonConnection {
   return {
     id: connection.id,
+    tenantId: connection.tenantId,
     sellerId: connection.sellerId,
     marketplaceId: connection.marketplaceId,
     encryptedRefreshToken: encryptSecret(connection.refreshToken),
@@ -119,6 +129,7 @@ function toStoredConnection(connection: AmazonConnection): StoredAmazonConnectio
 function fromDatabaseRow(row: DatabaseConnectionRow): StoredAmazonConnection {
   return {
     id: row.id,
+    tenantId: row.tenant_id ?? undefined,
     sellerId: row.seller_id ?? undefined,
     marketplaceId: row.marketplace_id,
     encryptedRefreshToken: row.encrypted_refresh_token,
@@ -133,7 +144,7 @@ async function readStoredConnections(): Promise<StoredAmazonConnection[]> {
     await initializeAmazonConnectionStore();
     const result = await connectionPool.query<DatabaseConnectionRow>(
       `
-        SELECT id, seller_id, marketplace_id, encrypted_refresh_token, connected_at
+        SELECT id, tenant_id, seller_id, marketplace_id, encrypted_refresh_token, connected_at
         FROM scanneraz_amazon_connections
         ORDER BY connected_at DESC
       `
@@ -154,9 +165,10 @@ export async function saveAmazonConnection(connection: AmazonConnection) {
     await connectionPool.query(
       `
         INSERT INTO scanneraz_amazon_connections (
-          id, seller_id, marketplace_id, encrypted_refresh_token, connected_at
-        ) VALUES ($1, $2, $3, $4, $5)
+          id, tenant_id, seller_id, marketplace_id, encrypted_refresh_token, connected_at
+        ) VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (id) DO UPDATE SET
+          tenant_id = EXCLUDED.tenant_id,
           seller_id = EXCLUDED.seller_id,
           marketplace_id = EXCLUDED.marketplace_id,
           encrypted_refresh_token = EXCLUDED.encrypted_refresh_token,
@@ -164,6 +176,7 @@ export async function saveAmazonConnection(connection: AmazonConnection) {
       `,
       [
         stored.id,
+        stored.tenantId ?? null,
         stored.sellerId ?? null,
         stored.marketplaceId,
         stored.encryptedRefreshToken,
@@ -188,6 +201,7 @@ export async function getAmazonConnection(id: string): Promise<AmazonConnection 
 
   return {
     id: connection.id,
+    tenantId: connection.tenantId,
     sellerId: connection.sellerId,
     marketplaceId: connection.marketplaceId,
     refreshToken: decryptSecret(connection.encryptedRefreshToken),
@@ -200,4 +214,115 @@ export async function listAmazonConnections() {
     ...connection,
     hasRefreshToken: Boolean(encryptedRefreshToken)
   }));
+}
+
+export async function getAmazonConnectionForTenant(id: string, tenantId: string) {
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await initializeAmazonConnectionStore();
+    const result = await connectionPool.query<DatabaseConnectionRow>(
+      `
+        SELECT id, tenant_id, seller_id, marketplace_id, encrypted_refresh_token, connected_at
+        FROM scanneraz_amazon_connections
+        WHERE id = $1 AND tenant_id = $2
+        LIMIT 1
+      `,
+      [id, tenantId]
+    );
+    const row = result.rows[0];
+
+    if (!row) {
+      return undefined;
+    }
+
+    return toAmazonConnection(fromDatabaseRow(row));
+  }
+
+  assertLocalStoreAllowed();
+  const connection = readLocalConnections().find(
+    (item) => item.id === id && item.tenantId === tenantId
+  );
+
+  if (!connection) {
+    return undefined;
+  }
+
+  return toAmazonConnection(connection);
+}
+
+export async function listAmazonConnectionsForTenant(tenantId: string) {
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await initializeAmazonConnectionStore();
+    const result = await connectionPool.query<DatabaseConnectionRow>(
+      `
+        SELECT id, tenant_id, seller_id, marketplace_id, encrypted_refresh_token, connected_at
+        FROM scanneraz_amazon_connections
+        WHERE tenant_id = $1
+        ORDER BY connected_at DESC
+      `,
+      [tenantId]
+    );
+
+    return result.rows.map((row) => toPublicConnection(fromDatabaseRow(row)));
+  }
+
+  assertLocalStoreAllowed();
+  return readLocalConnections()
+    .filter((connection) => connection.tenantId === tenantId)
+    .map(({ encryptedRefreshToken, tenantId: _tenantId, ...connection }) => ({
+      ...connection,
+      hasRefreshToken: Boolean(encryptedRefreshToken)
+    }));
+}
+
+export async function deleteAmazonConnectionForTenant(id: string, tenantId: string) {
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await initializeAmazonConnectionStore();
+    const result = await connectionPool.query(
+      `
+        DELETE FROM scanneraz_amazon_connections
+        WHERE id = $1 AND tenant_id = $2
+      `,
+      [id, tenantId]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  assertLocalStoreAllowed();
+  const connections = readLocalConnections();
+  const remainingConnections = connections.filter(
+    (connection) => connection.id !== id || connection.tenantId !== tenantId
+  );
+
+  if (remainingConnections.length === connections.length) {
+    return false;
+  }
+
+  writeLocalConnections(remainingConnections);
+  return true;
+}
+
+function toAmazonConnection(connection: StoredAmazonConnection): AmazonConnection {
+  return {
+    id: connection.id,
+    tenantId: connection.tenantId,
+    sellerId: connection.sellerId,
+    marketplaceId: connection.marketplaceId,
+    refreshToken: decryptSecret(connection.encryptedRefreshToken),
+    connectedAt: connection.connectedAt
+  };
+}
+
+function toPublicConnection(connection: StoredAmazonConnection) {
+  const { encryptedRefreshToken, tenantId: _tenantId, ...publicConnection } = connection;
+
+  return {
+    ...publicConnection,
+    hasRefreshToken: Boolean(encryptedRefreshToken)
+  };
 }

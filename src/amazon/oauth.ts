@@ -4,6 +4,7 @@ import { config } from "../config.js";
 export type AmazonOAuthState = {
   nonce: string;
   createdAt: string;
+  tenantId?: string;
 };
 
 const authorizationHosts: Record<typeof config.AMAZON_REGION, string> = {
@@ -15,10 +16,15 @@ const authorizationHosts: Record<typeof config.AMAZON_REGION, string> = {
 const oauthStateMaxAgeMs = 10 * 60 * 1000;
 const oauthStateClockSkewMs = 60 * 1000;
 
-export function createOAuthState(): AmazonOAuthState {
+export function createOAuthState(input: { tenantId?: string } = {}): AmazonOAuthState {
+  if (input.tenantId && !/^[a-f0-9-]{36}$/i.test(input.tenantId)) {
+    throw new Error("Invalid OAuth tenant state");
+  }
+
   return {
     nonce: crypto.randomBytes(24).toString("base64url"),
-    createdAt: new Date().toISOString()
+    createdAt: new Date().toISOString(),
+    ...(input.tenantId ? { tenantId: input.tenantId } : {})
   };
 }
 
@@ -36,7 +42,12 @@ export function decodeState(value: string): AmazonOAuthState {
 
   const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
 
-  if (typeof parsed?.nonce !== "string" || typeof parsed?.createdAt !== "string") {
+  if (
+    typeof parsed?.nonce !== "string" ||
+    typeof parsed?.createdAt !== "string" ||
+    (parsed?.tenantId !== undefined &&
+      (typeof parsed.tenantId !== "string" || !/^[a-f0-9-]{36}$/i.test(parsed.tenantId)))
+  ) {
     throw new Error("Invalid OAuth state");
   }
 
@@ -49,7 +60,7 @@ export function decodeState(value: string): AmazonOAuthState {
     throw new Error("Expired OAuth state");
   }
 
-  return parsed;
+  return parsed as AmazonOAuthState;
 }
 
 function signState(payload: string) {

@@ -16,6 +16,14 @@ const envSchema = z.object({
   AMAZON_REFRESH_TOKEN: z.string().min(1).optional(),
   AMAZON_SELLER_ID: z.string().min(1).optional(),
   SCANNERAZ_OPERATOR_TOKEN: z.string().min(32).optional(),
+  SCANNERAZ_PUBLIC_APP_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  SCANNERAZ_PUBLIC_SIGNUP_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   KEEPA_API_KEY: z.string().min(1).optional(),
   TARGET_PROVIDER: z.enum(["public-web", "unwrangle"]).default("public-web"),
   TARGET_API_KEY: z.string().min(1).optional(),

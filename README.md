@@ -24,7 +24,7 @@ npm start
 
 Use these settings:
 
-- Build command: `npm ci && npm run build`
+- Build command: `npm ci --include=dev && npm run build`
 - Start command: `npm start`
 - Health check path: `/health`
 
@@ -38,3 +38,30 @@ or connection-specific SP-API routes are enabled. Set a 32+ character
 server-only `SCANNERAZ_OPERATOR_TOKEN` before enabling Amazon routes in
 production; never place it in `EXPO_PUBLIC_*` or the mobile bundle. Set
 `DATABASE_SSL=true` only if the managed PostgreSQL endpoint requires TLS.
+
+## Public-selling-partner foundation
+
+The public application routes remain disabled by default. They provide the
+foundation for a ScannerAz user account, tenant-scoped Amazon connection, and
+tenant-scoped eligibility check:
+
+- `POST /auth/scanneraz/register`
+- `POST /auth/scanneraz/login`
+- `GET /auth/scanneraz/me`
+- `POST /auth/scanneraz/logout`
+- `GET /auth/amazon/connect`
+- `GET /api/public/amazon/connections`
+- `POST /api/public/amazon/connections/:connectionId/restrictions/check`
+- `DELETE /api/public/amazon/connections/:connectionId`
+
+Enable this surface only when all four prerequisites are true:
+
+1. `DATABASE_URL` points to a private managed PostgreSQL database.
+2. `ENCRYPTION_KEY` and `SESSION_SECRET` are configured in the production secret manager.
+3. `SCANNERAZ_PUBLIC_APP_ENABLED=true` is configured server-side.
+4. The production security and public-launch checklists have been completed.
+
+Registration additionally requires `SCANNERAZ_PUBLIC_SIGNUP_ENABLED=true`.
+The returned ScannerAz session token is not an Amazon credential; the mobile
+client must keep it in secure device storage, never AsyncStorage or an
+`EXPO_PUBLIC_*` setting.

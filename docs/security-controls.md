@@ -16,6 +16,7 @@ messages, or tax data.
 | Input restraint | JSON request bodies are capped at 64 KB and route inputs are validated with Zod where structured input is accepted. | `src/server.ts`, route modules |
 | OAuth integrity | OAuth state is HMAC-signed with `SESSION_SECRET`, matched with a secure cookie, and expires after 10 minutes. | `src/amazon/oauth.ts`, `src/server.ts` |
 | Token encryption and storage | Refresh tokens are encrypted with AES-256-GCM. In production, Amazon routes require a configured managed PostgreSQL store; the local JSON file is development-only. | `src/security/crypto.ts`, `src/storage/connections.ts`, `src/server.ts` |
+| Public tenant isolation | ScannerAz account sessions are opaque, stored only as hashes, and bind a user to a tenant. Public Amazon routes query connections by that tenant, and OAuth state carries a signed tenant ID. This surface is disabled until the managed store, secret configuration, and public-release flag are present. | `src/storage/accounts.ts`, `src/auth/session.ts`, `src/amazon/publicRoutes.ts`, `src/server.ts` |
 | Sensitive-route gate | In production, Amazon OAuth, connection, and SP-API routes remain disabled unless a server-only operator bearer token is configured. | `src/server.ts` |
 | Secret handling | `.env`, `data/`, and generated token files are excluded from source control. | `.gitignore` |
 | Safe failure handling | Browser-facing errors contain a request ID, not upstream response bodies, credentials, or tokens. | `src/server.ts` |

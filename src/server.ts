@@ -12,13 +12,27 @@ import {
   exchangeAuthorizationCode,
   getAmazonAuthorizationUrl
 } from "./amazon/oauth.js";
+import { publicAmazonRouter } from "./amazon/publicRoutes.js";
 import { amazonRouter } from "./amazon/routes.js";
+import {
+  endRequestSession,
+  requireTenantSession,
+  setSessionCookie
+} from "./auth/session.js";
 import {
   initializeAmazonConnectionStore,
   listAmazonConnections,
   saveAmazonConnection,
   usesManagedAmazonConnectionStore
 } from "./storage/connections.js";
+import {
+  AccountAlreadyExistsError,
+  initializeAccountStore,
+  InvalidCredentialsError,
+  loginAccount,
+  registerAccount,
+  usesManagedAccountStore
+} from "./storage/accounts.js";
 import { keepaRouter } from "./keepa/routes.js";
 import { retailRouter } from "./retail/routes.js";
 import "./retail/target/clearance.js";
@@ -71,6 +85,31 @@ const oauthRateLimit = rateLimit({
     });
   }
 });
+const accountRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 8,
+  legacyHeaders: false,
+  standardHeaders: true,
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many account attempts. Try again later.",
+      requestId: res.locals.requestId
+    });
+  }
+});
+const publicTenantRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  legacyHeaders: false,
+  standardHeaders: true,
+  keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many product checks. Try again shortly.",
+      requestId: res.locals.requestId
+    });
+  }
+});
 
 function getOAuthCookieOptions() {
   return {
@@ -97,9 +136,87 @@ app.get("/health", (_req, res) => {
 
 app.use("/api/keepa", keepaRouter);
 app.use("/api/amazon", apiRateLimit, requireOperatorAccess, amazonRouter);
+app.use(
+  "/api/public/amazon",
+  requirePublicAppAccess,
+  requireTenantSession,
+  publicTenantRateLimit,
+  publicAmazonRouter
+);
 app.use("/api/retail", retailRouter);
 app.use("/api/retail/target", targetRouter);
 app.use("/auth/amazon", oauthRateLimit);
+
+app.post("/auth/scanneraz/register", requirePublicAppAccess, accountRateLimit, async (req, res, next) => {
+  try {
+    if (!config.SCANNERAZ_PUBLIC_SIGNUP_ENABLED) {
+      res.status(503).json({
+        error: "ScannerAz public registration is not enabled yet.",
+        requestId: res.locals.requestId
+      });
+      return;
+    }
+
+    const session = await registerAccount({
+      email: String(req.body?.email ?? ""),
+      password: String(req.body?.password ?? "")
+    });
+    sendSession(res, session, 201);
+  } catch (error) {
+    if (error instanceof AccountAlreadyExistsError) {
+      res.status(409).json({ error: "An account already exists for this email address." });
+      return;
+    }
+
+    if (error instanceof Error && /email|password/i.test(error.message)) {
+      res.status(400).json({ error: "Email or password does not meet the requirements." });
+      return;
+    }
+
+    next(error);
+  }
+});
+
+app.post("/auth/scanneraz/login", requirePublicAppAccess, accountRateLimit, async (req, res, next) => {
+  try {
+    const session = await loginAccount({
+      email: String(req.body?.email ?? ""),
+      password: String(req.body?.password ?? "")
+    });
+    sendSession(res, session);
+  } catch (error) {
+    if (error instanceof InvalidCredentialsError) {
+      res.status(401).json({ error: "Invalid email or password." });
+      return;
+    }
+
+    if (error instanceof Error && /email/i.test(error.message)) {
+      res.status(401).json({ error: "Invalid email or password." });
+      return;
+    }
+
+    next(error);
+  }
+});
+
+app.get("/auth/scanneraz/me", requirePublicAppAccess, requireTenantSession, (req, res) => {
+  const session = req.scannerazTenantSession!;
+  res.setHeader("cache-control", "no-store");
+  res.json({
+    user: { id: session.userId, email: session.email },
+    tenant: { id: session.tenantId, role: session.role },
+    expiresAt: session.expiresAt
+  });
+});
+
+app.post("/auth/scanneraz/logout", requirePublicAppAccess, requireTenantSession, async (req, res, next) => {
+  try {
+    await endRequestSession(req, res);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get("/auth/amazon/start", requireOperatorAccess, (_req, res, next) => {
   try {
@@ -143,6 +260,18 @@ app.get("/auth/amazon/login", requireOperatorAccess, (req, res, next) => {
   }
 });
 
+app.get("/auth/amazon/connect", requirePublicAppAccess, requireTenantSession, (req, res, next) => {
+  try {
+    assertAmazonOAuthConfig();
+    assertOAuthSecurityConfig();
+    const state = encodeState(createOAuthState({ tenantId: req.scannerazTenantSession!.tenantId }));
+    res.cookie(oauthCookieName, state, getOAuthCookieOptions());
+    res.redirect(getAmazonAuthorizationUrl(state));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/auth/amazon/callback", async (req, res, next) => {
   try {
     assertAmazonOAuthConfig();
@@ -160,7 +289,15 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
     }
 
     res.clearCookie(oauthCookieName);
-    decodeState(state);
+    const oauthState = decodeState(state);
+
+    if (oauthState.tenantId && !isPublicAppReady()) {
+      res.status(503).json({
+        error: "ScannerAz public account connections are not enabled yet.",
+        requestId: res.locals.requestId
+      });
+      return;
+    }
 
     if (!code) {
       res.status(400).json({ error: "Missing Amazon authorization code" });
@@ -177,6 +314,7 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
     const id = crypto.randomUUID();
     await saveAmazonConnection({
       id,
+      tenantId: oauthState.tenantId,
       sellerId: sellingPartnerId,
       marketplaceId: config.AMAZON_MARKETPLACE_ID,
       refreshToken: tokenResponse.refresh_token,
@@ -224,7 +362,7 @@ void startServer();
 
 async function startServer() {
   try {
-    await initializeAmazonConnectionStore();
+    await Promise.all([initializeAmazonConnectionStore(), initializeAccountStore()]);
     app.listen(config.PORT, () => {
       console.log(`ScannerAz listening at ${config.APP_BASE_URL}`);
     });
@@ -282,4 +420,47 @@ function requireOperatorAccess(req: express.Request, res: express.Response, next
   }
 
   next();
+}
+
+function requirePublicAppAccess(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!isPublicAppReady()) {
+    res.status(503).json({
+      error: "ScannerAz public account connections are not enabled yet.",
+      requestId: res.locals.requestId
+    });
+    return;
+  }
+
+  next();
+}
+
+function isPublicAppReady() {
+  return (
+    config.SCANNERAZ_PUBLIC_APP_ENABLED &&
+    usesManagedAmazonConnectionStore() &&
+    usesManagedAccountStore() &&
+    Boolean(config.ENCRYPTION_KEY && config.SESSION_SECRET)
+  );
+}
+
+function sendSession(
+  res: express.Response,
+  session: {
+    accessToken: string;
+    userId: string;
+    email: string;
+    tenantId: string;
+    role: "owner" | "member";
+    expiresAt: string;
+  },
+  status = 200
+) {
+  setSessionCookie(res, session.accessToken);
+  res.setHeader("cache-control", "no-store");
+  res.status(status).json({
+    user: { id: session.userId, email: session.email },
+    tenant: { id: session.tenantId, role: session.role },
+    accessToken: session.accessToken,
+    expiresAt: session.expiresAt
+  });
 }
