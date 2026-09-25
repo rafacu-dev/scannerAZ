@@ -45,7 +45,7 @@ type ListingsRestrictionsResponse = {
 
 export type RestrictionStatus = "sellable" | "approval_required" | "blocked" | "unknown";
 
-async function getLwaAccessToken() {
+async function getLwaAccessToken(refreshToken: string) {
   const response = await fetch("https://api.amazon.com/auth/o2/token", {
     method: "POST",
     headers: {
@@ -53,7 +53,7 @@ async function getLwaAccessToken() {
     },
     body: new URLSearchParams({
       grant_type: "refresh_token",
-      refresh_token: config.AMAZON_REFRESH_TOKEN!,
+      refresh_token: refreshToken,
       client_id: config.AMAZON_LWA_CLIENT_ID!,
       client_secret: config.AMAZON_LWA_CLIENT_SECRET!
     })
@@ -70,11 +70,12 @@ async function getLwaAccessToken() {
 export async function getListingsRestrictions(input: {
   asin: string;
   sellerId: string;
+  refreshToken: string;
   conditionType?: string;
   marketplaceId?: string;
 }) {
   const { endpoint } = regionConfig[config.AMAZON_REGION];
-  const accessToken = (await getLwaAccessToken()).access_token;
+  const accessToken = (await getLwaAccessToken(input.refreshToken)).access_token;
   const url = new URL("/listings/2021-08-01/restrictions", endpoint);
 
   url.searchParams.set("asin", input.asin);
@@ -85,17 +86,46 @@ export async function getListingsRestrictions(input: {
 
   const response = await fetch(url, {
     headers: {
-      "x-amz-access-token": accessToken
+      accept: "application/json",
+      "user-agent": "ScannerAz/0.1.0 (Language=Node.js; Platform=backend)",
+      "x-amz-access-token": accessToken,
+      "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "")
     }
   });
   const body = await response.text();
-  const parsedBody = body ? JSON.parse(body) : {};
+  const parsedBody = parseJsonBody(body);
 
   if (!response.ok) {
-    throw new Error(`Amazon Listings Restrictions failed: ${response.status} ${body}`);
+    throw new Error(formatSpApiError("Amazon Listings Restrictions", response.status, parsedBody));
   }
 
   return parsedBody as ListingsRestrictionsResponse;
+}
+
+function parseJsonBody(body: string) {
+  if (!body) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    return body;
+  }
+}
+
+function formatSpApiError(operation: string, status: number, body: unknown) {
+  const payload = typeof body === "string" ? body : JSON.stringify(body);
+
+  if (status === 401 || status === 403) {
+    return `${operation} failed: ${status}. Check that the refresh token belongs to this SP-API app, the seller has authorized it, and the app has the required Product Listing role. Body: ${payload}`;
+  }
+
+  if (status === 429) {
+    return `${operation} rate limited: ${status}. Body: ${payload}`;
+  }
+
+  return `${operation} failed: ${status}. Body: ${payload}`;
 }
 
 export function normalizeListingsRestrictions(response: ListingsRestrictionsResponse): {

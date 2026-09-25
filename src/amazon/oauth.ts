@@ -12,6 +12,9 @@ const authorizationHosts: Record<typeof config.AMAZON_REGION, string> = {
   fe: "https://sellercentral.amazon.co.jp"
 };
 
+const oauthStateMaxAgeMs = 10 * 60 * 1000;
+const oauthStateClockSkewMs = 60 * 1000;
+
 export function createOAuthState(): AmazonOAuthState {
   return {
     nonce: crypto.randomBytes(24).toString("base64url"),
@@ -20,17 +23,48 @@ export function createOAuthState(): AmazonOAuthState {
 }
 
 export function encodeState(state: AmazonOAuthState): string {
-  return Buffer.from(JSON.stringify(state), "utf8").toString("base64url");
+  const payload = Buffer.from(JSON.stringify(state), "utf8").toString("base64url");
+  return `${payload}.${signState(payload)}`;
 }
 
 export function decodeState(value: string): AmazonOAuthState {
-  const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  const [payload, signature, ...extra] = value.split(".");
+
+  if (!payload || !signature || extra.length > 0 || !safeEqual(signature, signState(payload))) {
+    throw new Error("Invalid OAuth state signature");
+  }
+
+  const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
 
   if (typeof parsed?.nonce !== "string" || typeof parsed?.createdAt !== "string") {
     throw new Error("Invalid OAuth state");
   }
 
+  const createdAtMs = Date.parse(parsed.createdAt);
+  if (
+    Number.isNaN(createdAtMs) ||
+    createdAtMs > Date.now() + oauthStateClockSkewMs ||
+    Date.now() - createdAtMs > oauthStateMaxAgeMs
+  ) {
+    throw new Error("Expired OAuth state");
+  }
+
   return parsed;
+}
+
+function signState(payload: string) {
+  if (!config.SESSION_SECRET) {
+    throw new Error("Missing SESSION_SECRET");
+  }
+
+  return crypto.createHmac("sha256", config.SESSION_SECRET).update(payload).digest("base64url");
+}
+
+function safeEqual(left: string, right: string) {
+  const leftBuffer = Buffer.from(left, "utf8");
+  const rightBuffer = Buffer.from(right, "utf8");
+
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 export function getAmazonAuthorizationUrl(state: string): string {

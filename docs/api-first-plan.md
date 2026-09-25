@@ -149,7 +149,7 @@ Create these before production integration:
   - `AMAZON_LWA_CLIENT_ID`
   - `AMAZON_LWA_CLIENT_SECRET`
   - `AMAZON_SP_API_APP_ID`
-  - AWS IAM role or credentials required by SP-API signing
+  - Product Listing role enabled for eligibility checks
 - Walmart API credentials, if approved:
   - `WALMART_CLIENT_ID`
   - `WALMART_CLIENT_SECRET`

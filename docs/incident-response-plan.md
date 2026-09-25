@@ -12,6 +12,11 @@ This plan covers security incidents involving ScannerAz systems that store, proc
 
 For the current bootstrap phase, these roles may be held by the same person.
 
+Each role must have a current contact method recorded in the private operating
+runbook. The Communications Owner is responsible for opening the Amazon case
+or sending the required notification; the Technical Lead is responsible for
+containment and evidence preservation.
+
 ## Incident types
 
 - Exposed API credentials.
@@ -36,7 +41,7 @@ For the current bootstrap phase, these roles may be held by the same person.
    - impacted accounts
    - affected endpoints
 4. Assess whether Amazon Information was exposed.
-5. Notify Amazon at `security@amazon.com` within 24 hours of detecting a security incident involving Amazon Information.
+5. Start Amazon notification within 24 hours of detecting a security incident involving Amazon Information. Verify the current reporting channel in the Amazon Data Protection Policy or Solution Provider Portal before sending.
 6. Notify other parties or regulators if required by law.
 7. Remediate the root cause.
 8. Document the incident, remediation, and preventive control changes.
@@ -46,13 +51,16 @@ For the current bootstrap phase, these roles may be held by the same person.
 
 This incident response plan must be reviewed every 6 months and after any major system, infrastructure, permission, or data handling change.
 
+Each review must record the date, reviewer, changes made, tabletop exercise
+result, and any follow-up owner. Keep the review record in the private
+operating runbook; do not store credentials or incident evidence in this repo.
+
 ## Amazon notification
 
-If Amazon Information is affected, notification must be sent to:
-
-```txt
-security@amazon.com
-```
+If Amazon Information is affected, notification must be sent through the
+current channel named in Amazon's Data Protection Policy or Solution Provider
+Portal. The prior `security@amazon.com` route should be treated as a fallback
+only after it is verified as current.
 
 The notification should include:
 

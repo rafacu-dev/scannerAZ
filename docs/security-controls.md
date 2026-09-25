@@ -1,51 +1,74 @@
 # Security controls for Amazon SP-API access
 
-## Scope
+## Scope and data minimization
 
-ScannerAz will access Amazon Selling Partner API only for authorized seller accounts. The initial use is product research, catalog matching, pricing review, and listing eligibility checks.
+ScannerAz is intended for authorized seller accounts only. Its current SP-API
+use cases are listing eligibility, catalog matching, price review, and offer
+analysis. It does not request buyer PII, order data, payment data, buyer
+messages, or tax data.
 
-ScannerAz does not request buyer personal information, order data, payment data, buyer communication, or tax data.
+## Controls implemented in the application
 
-## Network security controls
+| Control | Implementation | Evidence |
+| --- | --- | --- |
+| Transport protection | Helmet security headers; production deployments must use an HTTPS `APP_BASE_URL`. | `src/server.ts` |
+| Request abuse protection | Amazon routes are limited to 60 requests per minute per source IP; OAuth routes to 12 requests per 15 minutes. | `src/server.ts` |
+| Input restraint | JSON request bodies are capped at 64 KB and route inputs are validated with Zod where structured input is accepted. | `src/server.ts`, route modules |
+| OAuth integrity | OAuth state is HMAC-signed with `SESSION_SECRET`, matched with a secure cookie, and expires after 10 minutes. | `src/amazon/oauth.ts`, `src/server.ts` |
+| Token encryption and storage | Refresh tokens are encrypted with AES-256-GCM. In production, Amazon routes require a configured managed PostgreSQL store; the local JSON file is development-only. | `src/security/crypto.ts`, `src/storage/connections.ts`, `src/server.ts` |
+| Sensitive-route gate | In production, Amazon OAuth, connection, and SP-API routes remain disabled unless a server-only operator bearer token is configured. | `src/server.ts` |
+| Secret handling | `.env`, `data/`, and generated token files are excluded from source control. | `.gitignore` |
+| Safe failure handling | Browser-facing errors contain a request ID, not upstream response bodies, credentials, or tokens. | `src/server.ts` |
 
-Production deployment must implement:
+## Production controls that must be configured before SP-API launch
 
-- HTTPS/TLS 1.2 or higher for all public traffic.
-- Cloud firewall/security groups allowing only required inbound ports.
-- WAF or equivalent application-layer protection for public endpoints.
-- IDS/IPS or cloud-native threat detection where available.
-- Malware protection or cloud-native runtime protection on systems that process Amazon Information.
-- Separate production secrets from local development secrets.
-- No direct public access to databases or token storage.
+These are deployment obligations, not claims that source code alone fulfills.
+Do not state that they are active in the Developer Profile until each item has
+an owner and verifiable evidence.
 
-## Access controls
+- Terminate all public traffic with TLS 1.2+ and redirect HTTP to HTTPS.
+- Place the API behind a managed WAF/firewall with managed OWASP rules and a
+  documented allowlist for administrative access where feasible.
+- Enable the provider's intrusion detection/prevention or equivalent managed
+  threat detection, and configure alerts for WAF blocks, authentication abuse,
+  configuration changes, and abnormal API error rates.
+- Use provider-managed malware/runtime protection for the production workload,
+  or maintain documented endpoint protection for every host that processes
+  Amazon Information.
+- Segment production from development and isolate token storage in a private,
+  managed database or secret store. Never expose a database or token file to
+  the public Internet.
+- Give production secrets only to approved operators through a managed secret
+  manager. Use distinct production, staging, and development credentials.
+- Replace the temporary operator gate with individual user authentication and
+  authorization before allowing accounts outside the operator's organization.
+- Require MFA for infrastructure, source-control, cloud, and Amazon
+  administrative accounts.
 
-- Access to Amazon Information is limited to authorized users with business need.
-- Programmatic credentials are stored in environment variables or secret storage.
-- Refresh tokens are encrypted at rest.
-- `.env`, token files, and local `data/` are excluded from source control.
-- Administrative access requires strong passwords and MFA.
+## Credential management and logging
 
-## Encryption
-
-- Amazon Information transmitted over public networks must use HTTPS/TLS 1.2 or higher.
-- Amazon refresh tokens are encrypted at rest using AES-256-GCM in local development.
-- Production should use managed secret storage or encrypted database fields.
-
-## Credential management
-
-- No Amazon passwords are stored.
-- No Seller Central cookies are stored.
-- No Amazon credentials are committed to source control.
-- API credentials are rotated at least annually or immediately upon suspected compromise.
-
-## Logging
-
-- Logs must not include access tokens, refresh tokens, client secrets, AWS secret keys, or full authorization headers.
-- API errors may be logged with request id, endpoint, timestamp, and non-sensitive status details.
+- No Amazon password, Seller Central cookie, refresh token, client secret, or
+  full authorization header may be committed, returned to a client, or written
+  to application logs.
+- Revoke and rotate affected credentials immediately after a suspected
+  compromise, and at least annually as an operating review item.
+- Logs may contain a request ID, route, timestamp, and status outcome only.
 
 ## Data sharing
 
-Amazon Information is not shared with outside parties except infrastructure providers required to operate the application.
+Amazon Information is not shared with third parties except approved
+infrastructure providers required to operate the service. Public retail data
+is used only for product research and comparison.
 
-Retail product data from public retail websites may be used only for product research and comparison.
+## Operating records
+
+Maintain the following records outside source control:
+
+- WAF/firewall and threat-detection configuration evidence.
+- Secret-access roster and MFA verification.
+- Semiannual incident-response review record.
+- Security incidents, containment actions, and Amazon notifications.
+
+See `docs/incident-response-plan.md` and
+`docs/amazon-sp-api-security-remediation.md` for the response process and
+resubmission checklist.

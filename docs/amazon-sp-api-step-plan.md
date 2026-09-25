@@ -60,7 +60,10 @@ No Keepa, Walmart, Target, or Publix until this works.
 - LWA client secret.
 - SP-API application id.
 - OAuth redirect URI configured in Amazon.
-- AWS IAM role/credentials for SP-API request signing.
+- Product Listing role enabled for the application.
+
+Amazon no longer requires AWS IAM or AWS Signature Version 4 to call SP-API.
+Use the LWA access token generated from the seller's refresh token for requests.
 
 ### Risks
 
@@ -96,18 +99,16 @@ Click "Connect Amazon Seller Account" locally, authorize the app, and confirm th
 ### Tasks
 
 1. Use the refresh token to request a short-lived LWA access token.
-2. Sign an SP-API request using AWS SigV4.
-3. Call a low-risk endpoint to verify credentials work.
+2. Call a low-risk endpoint with the LWA access token and required user-agent.
 
 ### Expected outputs
 
 - Successful SP-API response.
 - Clean error handling for:
   - invalid refresh token
-  - invalid AWS signature
   - expired credentials
   - wrong region
-  - missing role permission
+  - missing application role or seller authorization
 
 ### First test
 
@@ -227,7 +228,7 @@ Use only products already marked `sellable` by Amazon.
 2. Implement environment/config validation.
 3. Implement Amazon OAuth start/callback.
 4. Store encrypted refresh token.
-5. Implement first SP-API signed request.
+5. Implement first LWA-authenticated SP-API request.
 6. Implement single-ASIN restriction check.
 7. Implement batch ASIN restriction check.
 8. Add Keepa.
