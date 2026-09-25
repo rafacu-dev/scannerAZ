@@ -6,9 +6,10 @@ connections are enabled.
 
 ```mermaid
 flowchart LR
-  Mobile[ScannerAz mobile client] --> Edge[Render HTTPS edge\nCloudflare DDoS network]
+  Mobile[ScannerAz mobile client] --> Edge[Cloudflare zone and\nscanneraz-edge-proxy Worker]
   Browser[ScannerAz public information site] --> Edge
-  Edge --> Api[scanneraz-api\nExpress service]
+  Edge --> Render[Render HTTPS edge]
+  Render --> Api[scanneraz-api\nExpress service]
   Api -->|private Render network| Db[(scanneraz-db\nprivate PostgreSQL)]
   Api -->|server-side LWA token exchange| Amazon[Amazon SP-API]
   GitHub[GitHub repository and CI] -->|verified deployment| Api
@@ -28,6 +29,16 @@ flowchart LR
 
 ## Current edge and runtime controls
 
+- `scanneraz-edge-proxy` is a Cloudflare Worker with a fixed Render origin;
+  it forwards only the original path and query string and cannot be used as an
+  open proxy. Its deployed source is mirrored in
+  `cloudflare/scanneraz-edge-proxy.js`.
+- The Worker adds an `X-ScannerAz-Edge: cloudflare` response marker and keeps
+  responses non-cacheable when the origin does not state a cache policy.
+- `scanneraz.warasoft.com` is the active public hostname for the Worker and
+  `APP_BASE_URL` on Render. The temporary `workers.dev` endpoint is disabled.
+- The `warasoft.com` zone uses Cloudflare TLS encryption mode `Full`, and the
+  Cloudflare Managed Ruleset is active.
 - Render terminates HTTPS and redirects HTTP to HTTPS for public web services.
 - Render places inbound traffic behind its Cloudflare-backed DDoS protection.
 - The application adds Helmet headers, request size limits, route-specific rate
@@ -39,8 +50,7 @@ flowchart LR
 ## Controls still required before public launch
 
 - Configure an independently managed WAF rule set and preserve the evidence of
-  active rules and alerts. The current `onrender.com` hostname cannot be
-  managed in the company's Cloudflare account.
+  active rules and alerts for `scanneraz.warasoft.com`.
 - Configure alert recipients and retain monitoring evidence for edge blocks,
   account abuse, configuration changes, and anomalous errors.
 - Complete the runtime/endpoint anti-malware review with the selected hosting

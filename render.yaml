@@ -36,7 +36,7 @@ services:
     envVars:
       - fromGroup: scanneraz-production-runtime
       - key: APP_BASE_URL
-        value: https://scanneraz-api.onrender.com
+        value: https://scanneraz.warasoft.com
       - key: DATABASE_URL
         fromDatabase:
           name: scanneraz-db

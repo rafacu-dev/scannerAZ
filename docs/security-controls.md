@@ -12,7 +12,8 @@ messages, or tax data.
 | Control | Implementation | Evidence |
 | --- | --- | --- |
 | Transport protection | Helmet security headers; production deployments must use an HTTPS `APP_BASE_URL`. | `src/server.ts` |
-| Edge DDoS protection | Render automatically places public web services behind Cloudflare-backed DDoS protection and redirects HTTP to HTTPS. This is not a replacement for a managed WAF rule set. | Render service configuration; `docs/production-architecture.md` |
+| Edge DDoS and WAF protection | `scanneraz.warasoft.com` is served by an active Cloudflare zone with the Cloudflare Managed Ruleset enabled; Render also provides Cloudflare-backed DDoS protection. This is not a replacement for monitoring and documented response procedures. | Cloudflare zone configuration; `docs/production-architecture.md` |
+| Edge proxy boundary | The Cloudflare Worker proxies only to the fixed `scanneraz-api.onrender.com` origin and preserves the original path and query string. It does not accept a caller-selected target. | `cloudflare/scanneraz-edge-proxy.js` |
 | Request abuse protection | Amazon routes are limited to 60 requests per minute per source IP; OAuth routes to 12 requests per 15 minutes. | `src/server.ts` |
 | Security telemetry | Rejected operator authentication and rate-limit events log request, Cloudflare, and Render trace identifiers without credentials or request bodies. | `src/server.ts` |
 | Input restraint | JSON request bodies are capped at 64 KB and route inputs are validated with Zod where structured input is accepted. | `src/server.ts`, route modules |
@@ -33,6 +34,9 @@ an owner and verifiable evidence.
 - Terminate all public traffic with TLS 1.2+ and redirect HTTP to HTTPS.
 - Place the API behind a managed WAF/firewall with managed OWASP rules and a
   documented allowlist for administrative access where feasible.
+- After `scanneraz.warasoft.com` is live, disable the public `workers.dev`
+  endpoint for `scanneraz-edge-proxy` and use the custom hostname as the only
+  intended public entry point.
 - Enable the provider's intrusion detection/prevention or equivalent managed
   threat detection, and configure alerts for WAF blocks, authentication abuse,
   configuration changes, and abnormal API error rates.
