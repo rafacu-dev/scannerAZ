@@ -40,8 +40,9 @@ Use the legal company information that DRECOM LLC controls:
 - Organization name: `DRECOM LLC`
 - Country: `United States`
 - Website: the verified ScannerAz public URL above
-- Primary contact, email, and phone: use a monitored company-controlled
-  support contact, not a personal or temporary contact
+- Public support contact: `Support.ScannerAz@drecom.dev`
+- Primary portal contact, email, and phone: use a monitored company-controlled
+  contact, not a personal or temporary contact
 
 Do not put a home address, personal credentials, Amazon tokens, or cloud
 secrets in this repository or in a public support request.
@@ -94,8 +95,8 @@ these controls until all evidence exists and has an owner.
 - [ ] ScannerAz user authentication, tenant ownership checks, and a seller
       disconnect workflow are implemented before any external seller can
       connect.
-- [ ] A direct, monitored public support channel is published on the ScannerAz
-      website.
+- [x] A direct, monitored public support channel is published on the ScannerAz
+      website: `Support.ScannerAz@drecom.dev`.
 
 Until every item above is true, the truthful answer is that the control is not
 yet fully implemented. The current source-level controls are documented in
