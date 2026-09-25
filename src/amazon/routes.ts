@@ -54,6 +54,7 @@ async function checkRestrictions(req: express.Request, res: express.Response, ne
       sellerId,
       connectionId: connectionId || undefined,
       marketplaceId: config.AMAZON_MARKETPLACE_ID,
+      spApiEnvironment: config.AMAZON_SP_API_ENVIRONMENT,
       conditionType,
       ...normalized
     });

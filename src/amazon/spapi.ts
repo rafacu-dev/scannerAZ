@@ -1,20 +1,32 @@
 import { config } from "../config.js";
 
 type RegionConfig = {
-  endpoint: string;
+  productionEndpoint: string;
+  sandboxEndpoint: string;
 };
 
 const regionConfig: Record<typeof config.AMAZON_REGION, RegionConfig> = {
   na: {
-    endpoint: "https://sellingpartnerapi-na.amazon.com"
+    productionEndpoint: "https://sellingpartnerapi-na.amazon.com",
+    sandboxEndpoint: "https://sandbox.sellingpartnerapi-na.amazon.com"
   },
   eu: {
-    endpoint: "https://sellingpartnerapi-eu.amazon.com"
+    productionEndpoint: "https://sellingpartnerapi-eu.amazon.com",
+    sandboxEndpoint: "https://sandbox.sellingpartnerapi-eu.amazon.com"
   },
   fe: {
-    endpoint: "https://sellingpartnerapi-fe.amazon.com"
+    productionEndpoint: "https://sellingpartnerapi-fe.amazon.com",
+    sandboxEndpoint: "https://sandbox.sellingpartnerapi-fe.amazon.com"
   }
 };
+
+export function getSpApiEndpoint(
+  region: typeof config.AMAZON_REGION,
+  environment: typeof config.AMAZON_SP_API_ENVIRONMENT
+) {
+  const endpoints = regionConfig[region];
+  return environment === "sandbox" ? endpoints.sandboxEndpoint : endpoints.productionEndpoint;
+}
 
 type LwaTokenResponse = {
   access_token: string;
@@ -74,7 +86,7 @@ export async function getListingsRestrictions(input: {
   conditionType?: string;
   marketplaceId?: string;
 }) {
-  const { endpoint } = regionConfig[config.AMAZON_REGION];
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
   const accessToken = (await getLwaAccessToken(input.refreshToken)).access_token;
   const url = new URL("/listings/2021-08-01/restrictions", endpoint);
 

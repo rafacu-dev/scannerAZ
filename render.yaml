@@ -11,6 +11,11 @@ envVarGroups:
         value: production
       - key: DATABASE_SSL
         value: "false"
+      # The registered Amazon app is currently a sandbox app. Change this to
+      # production only after Amazon has approved the developer profile and
+      # Product Listing role for the app.
+      - key: AMAZON_SP_API_ENVIRONMENT
+        value: sandbox
       - key: SCANNERAZ_PUBLIC_APP_ENABLED
         value: "false"
       - key: SCANNERAZ_PUBLIC_SIGNUP_ENABLED

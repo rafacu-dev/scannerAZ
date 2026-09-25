@@ -31,6 +31,7 @@ console.log(
       asin,
       sellerId,
       marketplaceId: config.AMAZON_MARKETPLACE_ID,
+      spApiEnvironment: config.AMAZON_SP_API_ENVIRONMENT,
       conditionType,
       ...normalized
     },

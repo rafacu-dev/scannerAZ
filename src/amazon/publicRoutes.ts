@@ -60,6 +60,7 @@ publicAmazonRouter.post("/connections/:connectionId/restrictions/check", async (
       asin,
       connectionId,
       marketplaceId: connection.marketplaceId,
+      spApiEnvironment: config.AMAZON_SP_API_ENVIRONMENT,
       conditionType,
       ...normalizeListingsRestrictions(response)
     });

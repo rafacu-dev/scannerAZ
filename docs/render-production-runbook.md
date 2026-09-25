@@ -43,6 +43,7 @@ on the free plan.
 | `APP_BASE_URL` | non-secret | service | Current public API origin. Update only after the custom domain is verified. |
 | `DATABASE_URL` | secret | Render database reference | Use the private `connectionString`; never copy it to Expo or Git. |
 | `DATABASE_SSL` | non-secret | Render group | `false` for the private Render Postgres connection unless Render changes the endpoint requirement. |
+| `AMAZON_SP_API_ENVIRONMENT` | non-secret | Render group | `sandbox` while the Amazon app is Sandbox. It returns mock responses. Change to `production` only after approval and a controlled pilot. |
 | `ENCRYPTION_KEY` | secret | Render-generated | Encrypts Amazon refresh tokens at rest. Rotation requires a deliberate token migration plan. |
 | `SESSION_SECRET` | secret | Render-generated | Signs OAuth state. Rotation invalidates outstanding OAuth state. |
 | `SCANNERAZ_OPERATOR_TOKEN` | secret | Render secret manager | Add only when operator-only Amazon routes are intentionally enabled. |
@@ -74,9 +75,12 @@ compiled into the mobile application and are visible to users.
 8. Replace the temporary free `scanneraz-db` plan with a paid dedicated plan
    before its 30-day expiration and before submitting the Amazon public-app
    security profile.
-9. After the Amazon Developer Profile and app roles are approved, add the LWA
-   variables in Render's secret manager, configure the verified OAuth callback,
-   and perform a limited pilot before changing the public flags.
+9. Run the first sandbox restriction check and confirm the response includes
+   `spApiEnvironment: "sandbox"`; sandbox responses are static test data, not
+   real seller eligibility.
+10. After the Amazon Developer Profile and app roles are approved, switch
+    `AMAZON_SP_API_ENVIRONMENT` to `production`, configure the verified OAuth
+    callback, and perform a limited pilot before changing the public flags.
 
 ## Mobile distribution configuration
 

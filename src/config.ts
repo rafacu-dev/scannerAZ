@@ -8,6 +8,9 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   APP_BASE_URL: z.string().url().default("http://localhost:3000"),
   AMAZON_REGION: z.enum(["na", "eu", "fe"]).default("na"),
+  // Sandbox must remain explicit so mocked eligibility data is never mistaken
+  // for a production seller decision.
+  AMAZON_SP_API_ENVIRONMENT: z.enum(["sandbox", "production"]).default("production"),
   AMAZON_MARKETPLACE_ID: z.string().default("ATVPDKIKX0DER"),
   AMAZON_LWA_CLIENT_ID: z.string().min(1).optional(),
   AMAZON_LWA_CLIENT_SECRET: z.string().min(1).optional(),
