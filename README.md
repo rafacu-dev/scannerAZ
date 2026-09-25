@@ -35,6 +35,9 @@ The Blueprint declares a private dedicated Postgres database, generated
 server-only secrets, and disabled-by-default public Amazon flags. It does not
 put credentials in source control.
 
+GitHub Actions verifies types, authentication tests, and the production build
+on `main` and pull requests before a Render deployment is relied upon.
+
 ## Amazon SP-API security
 
 Before deploying Amazon OAuth or SP-API access, complete the production controls
