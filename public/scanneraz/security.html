@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="ScannerAz security overview.">
+  <title>Security overview | ScannerAz</title>
+  <link rel="icon" href="assets/scanneraz-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header"><nav class="nav" aria-label="Primary navigation"><a class="brand" href="/scanneraz/"><img src="assets/scanneraz-icon.png" alt="ScannerAz logo"><span>ScannerAz<small>by DRECOM LLC</small></span></a><div class="nav-links"><a href="/scanneraz/">Product</a><a href="privacy.html">Privacy</a><a href="terms.html">Terms</a><a href="support.html">Support</a></div></nav></header>
+  <main class="content"><article class="policy">
+    <p class="eyebrow">DRECOM LLC</p>
+    <h1>ScannerAz security overview</h1>
+    <p class="metadata">Last updated: September 25, 2026</p>
+    <p>ScannerAz is designed so Amazon authorization data remains on the backend and seller connections stay isolated. Production availability is contingent on completing the operational controls required for the selected Amazon access roles.</p>
+    <h2>Application controls</h2>
+    <ul>
+      <li>HTTPS-only production access and security headers.</li>
+      <li>Short-lived, signed OAuth state values and HTTP-only authorization cookies.</li>
+      <li>Encrypted server-side storage for Amazon refresh tokens.</li>
+      <li>Request-size limits, rate limiting, and error responses that do not expose upstream credentials or provider responses.</li>
+      <li>Minimal-role access: Product Listing and Pricing only for the initial release.</li>
+    </ul>
+    <h2>Operational controls before public launch</h2>
+    <p>DRECOM LLC will not enable public seller connections until the production environment has a private managed database, managed secret storage, web application firewall controls, monitoring and alerting, access reviews, and the documented incident-response process required by Amazon's policies.</p>
+    <h2>Incident reporting</h2>
+    <p>ScannerAz maintains an incident-response process with defined operational roles, containment steps, evidence preservation, periodic review, and an Amazon notification process for incidents involving Amazon Information.</p>
+    <h2>Security questions</h2>
+    <p>For security concerns, use the support channel and include only a high-level description. Do not include passwords, refresh tokens, API keys, or buyer information in a public message.</p>
+  </article></main>
+  <footer class="footer"><div class="content footer-inner"><div><strong>ScannerAz by DRECOM LLC</strong><p>Independent product. Not affiliated with Amazon.</p></div><div class="footer-links"><a href="/scanneraz/">Home</a><a href="privacy.html">Privacy</a><a href="support.html">Support</a></div></div></footer>
+</body>
+</html>
