@@ -28,6 +28,13 @@ Use these settings:
 - Start command: `npm start`
 - Health check path: `/health`
 
+The production Blueprint and operational sequence are documented in
+[`render.yaml`](render.yaml) and
+[`docs/render-production-runbook.md`](docs/render-production-runbook.md).
+The Blueprint declares a private dedicated Postgres database, generated
+server-only secrets, and disabled-by-default public Amazon flags. It does not
+put credentials in source control.
+
 ## Amazon SP-API security
 
 Before deploying Amazon OAuth or SP-API access, complete the production controls

@@ -1,0 +1,59 @@
+# ScannerAz production infrastructure for Render.
+#
+# This Blueprint is deliberately conservative: it keeps seller connections and
+# public registration disabled until the security controls documented in
+# docs/amazon-sp-api-security-remediation.md are operating and verified.
+
+envVarGroups:
+  - name: scanneraz-production-runtime
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_SSL
+        value: "false"
+      - key: SCANNERAZ_PUBLIC_APP_ENABLED
+        value: "false"
+      - key: SCANNERAZ_PUBLIC_SIGNUP_ENABLED
+        value: "false"
+
+services:
+  - type: web
+    name: scanneraz-api
+    runtime: node
+    repo: https://github.com/rafacu-dev/scannerAZ.git
+    branch: main
+    region: oregon
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - fromGroup: scanneraz-production-runtime
+      - key: APP_BASE_URL
+        value: https://scanneraz-api.onrender.com
+      - key: DATABASE_URL
+        fromDatabase:
+          name: scanneraz-db
+          property: connectionString
+      # Render generates and stores these server-only values. They never belong
+      # in this repository, the Expo bundle, or an EXPO_PUBLIC_* variable.
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: SESSION_SECRET
+        generateValue: true
+
+databases:
+  - name: scanneraz-db
+    databaseName: scanneraz
+    user: scanneraz
+    region: oregon
+    postgresMajorVersion: "18"
+    # Smallest non-expiring Render Postgres compute tier.
+    plan: 0.1c-256mb
+    diskSizeGB: 1
+    storageAutoscalingEnabled: false
+    connectionPool: pgbouncer
+    # No public database ingress: scanneraz-api connects through Render's
+    # private network using DATABASE_URL above.
+    ipAllowList: []
