@@ -49,9 +49,9 @@ repository.
 List only the providers actually used in production when Amazon asks about
 outside parties:
 
-- Cloudflare, Inc.: HTTPS edge proxy, baseline DDoS protection, and routing.
-  Do not claim Cloudflare Managed WAF rules until they are enabled on the
-  selected plan.
+- Cloudflare, Inc.: HTTPS edge proxy, baseline DDoS protection, an active
+  custom firewall rule, and routing. Do not claim Cloudflare Managed WAF rules
+  until they are enabled on the selected plan.
 - Render Services, Inc.: API hosting and managed PostgreSQL storage for
   encrypted authorization records.
 
