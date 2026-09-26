@@ -11,11 +11,15 @@ envVarGroups:
         value: production
       - key: DATABASE_SSL
         value: "false"
-      # The registered Amazon app is currently a sandbox app. Change this to
-      # production only after Amazon has approved the developer profile and
-      # Product Listing role for the app.
+      # ScannerAz has an approved public developer profile. Keep the public
+      # account surface disabled until the production OAuth draft flow is
+      # tested with the registered app client and managed storage.
       - key: AMAZON_SP_API_ENVIRONMENT
-        value: sandbox
+        value: production
+      # Amazon requires the beta marker while the public application remains
+      # in Draft. Remove this variable when its Appstore listing is published.
+      - key: AMAZON_OAUTH_VERSION
+        value: beta
       - key: SCANNERAZ_PUBLIC_APP_ENABLED
         value: "false"
       - key: SCANNERAZ_PUBLIC_SIGNUP_ENABLED

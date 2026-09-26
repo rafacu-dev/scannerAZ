@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { config } from "../config.js";
+import { decryptSecret, encryptSecret } from "../security/crypto.js";
 
 export type AmazonOAuthState = {
   nonce: string;
@@ -15,6 +16,12 @@ const authorizationHosts: Record<typeof config.AMAZON_REGION, string> = {
 
 const oauthStateMaxAgeMs = 10 * 60 * 1000;
 const oauthStateClockSkewMs = 60 * 1000;
+
+export type AmazonWebsiteLoginRequest = {
+  amazonCallbackUri: string;
+  amazonState: string;
+  createdAt: string;
+};
 
 export function createOAuthState(input: { tenantId?: string } = {}): AmazonOAuthState {
   if (input.tenantId && !/^[a-f0-9-]{36}$/i.test(input.tenantId)) {
@@ -61,6 +68,78 @@ export function decodeState(value: string): AmazonOAuthState {
   }
 
   return parsed as AmazonOAuthState;
+}
+
+export function createAmazonWebsiteLoginRequest(input: {
+  amazonCallbackUri: string;
+  amazonState: string;
+}): AmazonWebsiteLoginRequest {
+  if (!config.AMAZON_SP_API_APP_ID) {
+    throw new Error("Missing Amazon OAuth configuration: AMAZON_SP_API_APP_ID");
+  }
+
+  const amazonState = input.amazonState.trim();
+
+  if (!amazonState || amazonState.length > 2048) {
+    throw new Error("Invalid Amazon authorization state");
+  }
+
+  let callbackUrl: URL;
+
+  try {
+    callbackUrl = new URL(input.amazonCallbackUri);
+  } catch {
+    throw new Error("Invalid Amazon callback URI");
+  }
+  const expectedOrigin = authorizationHosts[config.AMAZON_REGION];
+  const expectedPath = `/apps/authorize/confirm/${config.AMAZON_SP_API_APP_ID}`;
+
+  if (
+    callbackUrl.origin !== expectedOrigin ||
+    callbackUrl.pathname !== expectedPath ||
+    callbackUrl.protocol !== "https:"
+  ) {
+    throw new Error("Invalid Amazon callback URI");
+  }
+
+  return {
+    amazonCallbackUri: callbackUrl.toString(),
+    amazonState,
+    createdAt: new Date().toISOString()
+  };
+}
+
+export function encodeAmazonWebsiteLoginRequest(request: AmazonWebsiteLoginRequest) {
+  return encryptSecret(JSON.stringify(request));
+}
+
+export function decodeAmazonWebsiteLoginRequest(value: string): AmazonWebsiteLoginRequest {
+  const parsed = JSON.parse(decryptSecret(value));
+
+  if (
+    typeof parsed?.amazonCallbackUri !== "string" ||
+    typeof parsed?.amazonState !== "string" ||
+    typeof parsed?.createdAt !== "string"
+  ) {
+    throw new Error("Invalid Amazon website login request");
+  }
+
+  const createdAtMs = Date.parse(parsed.createdAt);
+
+  if (
+    Number.isNaN(createdAtMs) ||
+    createdAtMs > Date.now() + oauthStateClockSkewMs ||
+    Date.now() - createdAtMs > oauthStateMaxAgeMs
+  ) {
+    throw new Error("Expired Amazon website login request");
+  }
+
+  const validated = createAmazonWebsiteLoginRequest({
+    amazonCallbackUri: parsed.amazonCallbackUri,
+    amazonState: parsed.amazonState
+  });
+
+  return { ...validated, createdAt: parsed.createdAt };
 }
 
 function signState(payload: string) {

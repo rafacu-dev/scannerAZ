@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "build": "tsc && rm -rf dist/public && cp -R public dist/public",
-    "test:auth": "tsx --test src/auth/passwords.test.ts src/amazon/spapi.test.ts",
+    "test:auth": "tsx --test src/auth/passwords.test.ts src/amazon/oauth.test.ts src/amazon/spapi.test.ts",
     "amazon:check": "tsx src/scripts/check-amazon-restrictions.ts",
     "export:target": "tsx src/scripts/export-target-clearance.ts",
     "typecheck": "tsc --noEmit"

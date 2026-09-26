@@ -24,27 +24,36 @@ export async function requireTenantSession(
   next: express.NextFunction
 ) {
   try {
-    const accessToken = getRequestAccessToken(req);
+    const session = await loadOptionalTenantSession(req, res);
 
-    if (!accessToken) {
+    if (!session) {
       res.status(401).json({ error: "ScannerAz authentication is required" });
       return;
     }
 
-    const session = await getTenantSession(accessToken);
-
-    if (!session) {
-      clearSessionCookie(res);
-      res.status(401).json({ error: "ScannerAz session is invalid or expired" });
-      return;
-    }
-
-    req.scannerazTenantSession = session;
-    req.scannerazSessionToken = accessToken;
     next();
   } catch (error) {
     next(error);
   }
+}
+
+export async function loadOptionalTenantSession(req: express.Request, res: express.Response) {
+  const accessToken = getRequestAccessToken(req);
+
+  if (!accessToken) {
+    return undefined;
+  }
+
+  const session = await getTenantSession(accessToken);
+
+  if (!session) {
+    clearSessionCookie(res);
+    return undefined;
+  }
+
+  req.scannerazTenantSession = session;
+  req.scannerazSessionToken = accessToken;
+  return session;
 }
 
 export function setSessionCookie(res: express.Response, accessToken: string) {

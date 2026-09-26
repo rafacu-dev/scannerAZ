@@ -72,6 +72,10 @@ Enable this surface only when all four prerequisites are true:
 3. `SCANNERAZ_PUBLIC_APP_ENABLED=true` is configured server-side.
 4. The production security and public-launch checklists have been completed.
 
+While the public app is in Amazon's Draft state, set
+`AMAZON_OAUTH_VERSION=beta` server-side. Remove it only after the Selling
+Partner Appstore listing is published.
+
 Registration additionally requires `SCANNERAZ_PUBLIC_SIGNUP_ENABLED=true`.
 The returned ScannerAz session token is not an Amazon credential; the mobile
 client must keep it in secure device storage, never AsyncStorage or an

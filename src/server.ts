@@ -6,8 +6,12 @@ import { rateLimit } from "express-rate-limit";
 import helmet from "helmet";
 import { assertAmazonOAuthConfig, assertOAuthSecurityConfig, config } from "./config.js";
 import {
+  type AmazonWebsiteLoginRequest,
+  createAmazonWebsiteLoginRequest,
   createOAuthState,
+  decodeAmazonWebsiteLoginRequest,
   decodeState,
+  encodeAmazonWebsiteLoginRequest,
   encodeState,
   exchangeAuthorizationCode,
   getAmazonAuthorizationUrl
@@ -17,6 +21,7 @@ import { amazonRouter } from "./amazon/routes.js";
 import {
   clearSessionCookie,
   endRequestSession,
+  loadOptionalTenantSession,
   requireTenantSession,
   setSessionCookie
 } from "./auth/session.js";
@@ -60,10 +65,12 @@ app.use((_req, res, next) => {
   next();
 });
 
-app.use(helmet());
+app.use(helmet({ referrerPolicy: { policy: "no-referrer" } }));
 app.use(express.json({ limit: "64kb" }));
+app.use(express.urlencoded({ extended: false, limit: "16kb" }));
 
 const oauthCookieName = "scanneraz_amazon_oauth_state";
+const amazonWebsiteLoginCookieName = "scanneraz_amazon_website_login";
 const apiRateLimit = rateLimit({
   windowMs: 60 * 1000,
   limit: 60,
@@ -131,6 +138,95 @@ function getCookie(req: express.Request, name: string) {
   const cookies = req.headers.cookie?.split(";").map((cookie) => cookie.trim()) ?? [];
   const cookie = cookies.find((item) => item.startsWith(`${name}=`));
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : undefined;
+}
+
+function getAmazonWebsiteLoginRequest(req: express.Request) {
+  const value = getCookie(req, amazonWebsiteLoginCookieName);
+
+  if (!value) {
+    throw new Error("Missing Amazon website login request");
+  }
+
+  return decodeAmazonWebsiteLoginRequest(value);
+}
+
+function continueAmazonWebsiteAuthorization(
+  res: express.Response,
+  tenantId: string,
+  request: AmazonWebsiteLoginRequest
+) {
+  const state = encodeState(createOAuthState({ tenantId }));
+  const callbackUrl = new URL(request.amazonCallbackUri);
+  callbackUrl.searchParams.set("amazon_state", request.amazonState);
+  callbackUrl.searchParams.set("state", state);
+  callbackUrl.searchParams.set("redirect_uri", `${config.APP_BASE_URL}/auth/amazon/callback`);
+
+  if (config.AMAZON_OAUTH_VERSION) {
+    callbackUrl.searchParams.set("version", config.AMAZON_OAUTH_VERSION);
+  }
+
+  res.cookie(oauthCookieName, state, getOAuthCookieOptions());
+  res.clearCookie(amazonWebsiteLoginCookieName, getOAuthCookieOptions());
+  res.redirect(callbackUrl.toString());
+}
+
+function sendAmazonWebsiteLoginPage(
+  res: express.Response,
+  options: { status?: number; message?: string } = {}
+) {
+  res.status(options.status ?? 200).type("html").send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Connect Amazon | ScannerAz</title>
+    <style>
+      :root { color-scheme: light; font-family: Arial, sans-serif; }
+      body { align-items: center; background: #f4f6f7; color: #19232f; display: flex; justify-content: center; margin: 0; min-height: 100vh; }
+      main { background: #ffffff; border: 1px solid #d9e0e6; border-radius: 8px; box-shadow: 0 10px 28px rgba(25, 35, 47, 0.08); box-sizing: border-box; max-width: 420px; padding: 32px; width: calc(100% - 32px); }
+      .brand { color: #087a73; font-size: 14px; font-weight: 700; letter-spacing: 0.08em; margin: 0 0 10px; text-transform: uppercase; }
+      h1 { font-size: 24px; margin: 0 0 10px; }
+      p { color: #52616f; line-height: 1.5; margin: 0 0 22px; }
+      label { display: block; font-size: 14px; font-weight: 700; margin: 16px 0 7px; }
+      input { border: 1px solid #b8c3cc; border-radius: 6px; box-sizing: border-box; font: inherit; padding: 12px; width: 100%; }
+      button { background: #087a73; border: 0; border-radius: 6px; color: #ffffff; cursor: pointer; font: inherit; font-weight: 700; margin-top: 24px; padding: 12px 16px; width: 100%; }
+      .notice { background: #fff3e7; border: 1px solid #f0c896; border-radius: 6px; color: #784a10; font-size: 14px; margin-bottom: 18px; padding: 12px; }
+      .support { font-size: 13px; margin-top: 20px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="brand">ScannerAz</div>
+      <h1>Connect your Amazon account</h1>
+      <p>Sign in to ScannerAz to finish connecting the Amazon account you just authorized.</p>
+      ${options.message ? `<div class="notice" role="alert">${options.message}</div>` : ""}
+      <form action="/auth/amazon/login/session" method="post">
+        <label for="email">Email address</label>
+        <input id="email" name="email" type="email" autocomplete="email" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">Continue securely</button>
+      </form>
+      <p class="support">Need help? Contact <a href="mailto:Support.ScannerAz@drecom.dev">ScannerAz support</a>.</p>
+    </main>
+  </body>
+</html>`);
+}
+
+function renderAmazonWebsiteLoginError() {
+  return `<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connection expired | ScannerAz</title></head>
+  <body><main><h1>Connection request expired</h1><p>Return to ScannerAz and start the Amazon connection again.</p></main></body>
+</html>`;
+}
+
+function isAmazonWebsiteLoginRequestError(error: unknown) {
+  return (
+    error instanceof Error &&
+    /Amazon website login request|Amazon callback URI|Amazon authorization state/i.test(error.message)
+  );
 }
 
 app.get("/health", (_req, res) => {
@@ -294,35 +390,76 @@ app.get("/auth/amazon/start", requireOperatorAccess, (_req, res, next) => {
   }
 });
 
-app.get("/auth/amazon/login", requireOperatorAccess, (req, res, next) => {
+app.get("/auth/amazon/login", requirePublicAppAccess, async (req, res, next) => {
   try {
     assertAmazonOAuthConfig();
     assertOAuthSecurityConfig();
 
-    const amazonCallbackUri = String(req.query.amazon_callback_uri || "");
-    const amazonState = String(req.query.amazon_state || "");
+    const request = createAmazonWebsiteLoginRequest({
+      amazonCallbackUri: String(req.query.amazon_callback_uri || ""),
+      amazonState: String(req.query.amazon_state || "")
+    });
+    res.cookie(
+      amazonWebsiteLoginCookieName,
+      encodeAmazonWebsiteLoginRequest(request),
+      getOAuthCookieOptions()
+    );
 
-    if (!amazonCallbackUri || !amazonState) {
-      res.status(400).json({ error: "Missing Amazon login parameters" });
+    const session = await loadOptionalTenantSession(req, res);
+
+    if (!session) {
+      sendAmazonWebsiteLoginPage(res);
       return;
     }
 
-    const state = encodeState(createOAuthState());
-    const callbackUrl = new URL(amazonCallbackUri);
-    callbackUrl.searchParams.set("amazon_state", amazonState);
-    callbackUrl.searchParams.set("state", state);
-    callbackUrl.searchParams.set("redirect_uri", `${config.APP_BASE_URL}/auth/amazon/callback`);
-
-    if (config.AMAZON_OAUTH_VERSION) {
-      callbackUrl.searchParams.set("version", config.AMAZON_OAUTH_VERSION);
+    continueAmazonWebsiteAuthorization(res, session.tenantId, request);
+  } catch (error) {
+    if (isAmazonWebsiteLoginRequestError(error)) {
+      res.status(400).type("html").send(renderAmazonWebsiteLoginError());
+      return;
     }
 
-    res.cookie(oauthCookieName, state, getOAuthCookieOptions());
-    res.redirect(callbackUrl.toString());
-  } catch (error) {
     next(error);
   }
 });
+
+app.post(
+  "/auth/amazon/login/session",
+  requirePublicAppAccess,
+  accountRateLimit,
+  async (req, res, next) => {
+    try {
+      assertAmazonOAuthConfig();
+      assertOAuthSecurityConfig();
+      const request = getAmazonWebsiteLoginRequest(req);
+      const session = await loginAccount({
+        email: String(req.body?.email ?? ""),
+        password: String(req.body?.password ?? "")
+      });
+
+      setSessionCookie(res, session.accessToken);
+      continueAmazonWebsiteAuthorization(res, session.tenantId, request);
+    } catch (error) {
+      if (error instanceof InvalidCredentialsError || error instanceof PasswordExpiredError) {
+        sendAmazonWebsiteLoginPage(res, {
+          status: error instanceof PasswordExpiredError ? 403 : 401,
+          message:
+            error instanceof PasswordExpiredError
+              ? "Your password has expired. Contact ScannerAz support to continue."
+              : "The email address or password was not accepted."
+        });
+        return;
+      }
+
+      if (isAmazonWebsiteLoginRequestError(error)) {
+        res.status(400).type("html").send(renderAmazonWebsiteLoginError());
+        return;
+      }
+
+      next(error);
+    }
+  }
+);
 
 app.get("/auth/amazon/connect", requirePublicAppAccess, requireTenantSession, (req, res, next) => {
   try {
