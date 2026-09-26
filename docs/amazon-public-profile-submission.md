@@ -49,7 +49,9 @@ repository.
 List only the providers actually used in production when Amazon asks about
 outside parties:
 
-- Cloudflare, Inc.: HTTPS edge proxy, managed WAF/DDoS controls, and routing.
+- Cloudflare, Inc.: HTTPS edge proxy, baseline DDoS protection, and routing.
+  Do not claim Cloudflare Managed WAF rules until they are enabled on the
+  selected plan.
 - Render Services, Inc.: API hosting and managed PostgreSQL storage for
   encrypted authorization records.
 
@@ -58,7 +60,7 @@ For external non-Amazon sources that retrieve Amazon Information, answer
 
 ## Evidence gate before choosing Yes in the portal
 
-- [ ] `SCANNERAZ_EDGE_SHARED_SECRET` is stored only in Cloudflare Workers and
+- [x] `SCANNERAZ_EDGE_SHARED_SECRET` is stored only in Cloudflare Workers and
       Render; the origin rejects non-health direct requests and HTTPS redirects
       are verified.
 - [ ] A WAF/firewall, DDoS control, and monitoring/alerting configuration are

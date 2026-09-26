@@ -39,8 +39,9 @@ flowchart LR
   responses non-cacheable when the origin does not state a cache policy.
 - `scanneraz.warasoft.com` is the active public hostname for the Worker and
   `APP_BASE_URL` on Render. The temporary `workers.dev` endpoint is disabled.
-- The `warasoft.com` zone uses Cloudflare TLS encryption mode `Full`, and the
-  Cloudflare Managed Ruleset is active.
+- The `warasoft.com` zone enforces TLS 1.2 as its minimum version and redirects
+  HTTP to HTTPS. It currently uses Cloudflare Free baseline DDoS protection;
+  Cloudflare's paid Managed Ruleset is not active.
 - The staged Worker source redirects HTTP to HTTPS before forwarding traffic.
   This becomes an active control only after the Worker deployment and
   shared-secret rollout are verified. Render also terminates HTTPS for public
@@ -56,8 +57,6 @@ flowchart LR
 
 - Configure an independently managed WAF rule set and preserve the evidence of
   active rules and alerts for `scanneraz.warasoft.com`.
-- Set the matching `SCANNERAZ_EDGE_SHARED_SECRET` in Cloudflare Workers and
-  Render, then verify that the direct Render origin rejects non-health paths.
 - Configure alert recipients and retain monitoring evidence for edge blocks,
   account abuse, configuration changes, and anomalous errors.
 - Complete the runtime/endpoint anti-malware review with the selected hosting

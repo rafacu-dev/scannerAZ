@@ -55,7 +55,7 @@ Complete and retain evidence for every item below.
       tokens.
 - [ ] `SCANNERAZ_OPERATOR_TOKEN` is stored only in the server-side secret
       manager. It is not embedded in Expo or exposed to a browser.
-- [ ] `SCANNERAZ_EDGE_SHARED_SECRET` is stored only in the Cloudflare Worker
+- [x] `SCANNERAZ_EDGE_SHARED_SECRET` is stored only in the Cloudflare Worker
       and Render secret managers, and a direct-origin request to any non-health
       path is rejected after the Worker deployment.
 
