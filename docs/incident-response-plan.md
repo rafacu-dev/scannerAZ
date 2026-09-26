@@ -41,7 +41,7 @@ containment and evidence preservation.
    - impacted accounts
    - affected endpoints
 4. Assess whether Amazon Information was exposed.
-5. Start Amazon notification within 24 hours of detecting a security incident involving Amazon Information. Verify the current reporting channel in the Amazon Data Protection Policy or Solution Provider Portal before sending.
+5. Notify `security@amazon.com` within 24 hours of detecting a security incident involving Amazon Information. The Communications Owner records the delivery time and any Amazon case identifier in the private incident record.
 6. Notify other parties or regulators if required by law.
 7. Remediate the root cause.
 8. Document the incident, remediation, and preventive control changes.
@@ -57,10 +57,11 @@ operating runbook; do not store credentials or incident evidence in this repo.
 
 ## Amazon notification
 
-If Amazon Information is affected, notification must be sent through the
-current channel named in Amazon's Data Protection Policy or Solution Provider
-Portal. The prior `security@amazon.com` route should be treated as a fallback
-only after it is verified as current.
+If Amazon Information is affected, the Communications Owner sends the initial
+notification to `security@amazon.com` within 24 hours of detection and uses
+any additional current channel specified by Amazon's Data Protection Policy or
+Solution Provider Portal. The private incident record must retain the delivery
+timestamp and any Amazon case identifier.
 
 The notification should include:
 

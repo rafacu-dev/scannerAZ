@@ -31,7 +31,9 @@ flowchart LR
 
 - `scanneraz-edge-proxy` is a Cloudflare Worker with a fixed Render origin;
   it forwards only the original path and query string and cannot be used as an
-  open proxy. Its deployed source is mirrored in
+  open proxy. When its `SCANNERAZ_EDGE_SHARED_SECRET` Worker secret and the
+  matching Render secret are configured, the API rejects every direct-origin
+  request except Render's health probe. Its deployed source is mirrored in
   `cloudflare/scanneraz-edge-proxy.js`.
 - The Worker adds an `X-ScannerAz-Edge: cloudflare` response marker and keeps
   responses non-cacheable when the origin does not state a cache policy.
@@ -39,7 +41,10 @@ flowchart LR
   `APP_BASE_URL` on Render. The temporary `workers.dev` endpoint is disabled.
 - The `warasoft.com` zone uses Cloudflare TLS encryption mode `Full`, and the
   Cloudflare Managed Ruleset is active.
-- Render terminates HTTPS and redirects HTTP to HTTPS for public web services.
+- The staged Worker source redirects HTTP to HTTPS before forwarding traffic.
+  This becomes an active control only after the Worker deployment and
+  shared-secret rollout are verified. Render also terminates HTTPS for public
+  web services.
 - Render places inbound traffic behind its Cloudflare-backed DDoS protection.
 - The application adds Helmet headers, request size limits, route-specific rate
   limits, and no-store cache headers for authentication and Amazon routes.
@@ -51,6 +56,8 @@ flowchart LR
 
 - Configure an independently managed WAF rule set and preserve the evidence of
   active rules and alerts for `scanneraz.warasoft.com`.
+- Set the matching `SCANNERAZ_EDGE_SHARED_SECRET` in Cloudflare Workers and
+  Render, then verify that the direct Render origin rejects non-health paths.
 - Configure alert recipients and retain monitoring evidence for edge blocks,
   account abuse, configuration changes, and anomalous errors.
 - Complete the runtime/endpoint anti-malware review with the selected hosting

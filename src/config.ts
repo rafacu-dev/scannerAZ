@@ -18,6 +18,9 @@ const envSchema = z.object({
   AMAZON_OAUTH_VERSION: z.enum(["beta"]).optional(),
   AMAZON_REFRESH_TOKEN: z.string().min(1).optional(),
   AMAZON_SELLER_ID: z.string().min(1).optional(),
+  // Shared only by the Cloudflare Worker and Render. When set in production,
+  // every request except Render's health probe must come through the Worker.
+  SCANNERAZ_EDGE_SHARED_SECRET: z.string().min(32).optional(),
   SCANNERAZ_OPERATOR_TOKEN: z.string().min(32).optional(),
   SCANNERAZ_PUBLIC_APP_ENABLED: z
     .enum(["true", "false"])

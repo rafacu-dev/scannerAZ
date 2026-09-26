@@ -20,6 +20,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Scan tracked source for known malware signatures
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clamav
+          sudo freshclam --stdout
+          git ls-files -z | xargs -0 -r clamscan --no-summary --infected --
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npm run test:auth

@@ -15,6 +15,7 @@ import {
 import { publicAmazonRouter } from "./amazon/publicRoutes.js";
 import { amazonRouter } from "./amazon/routes.js";
 import {
+  clearSessionCookie,
   endRequestSession,
   requireTenantSession,
   setSessionCookie
@@ -27,9 +28,12 @@ import {
 } from "./storage/connections.js";
 import {
   AccountAlreadyExistsError,
+  changeAccountPassword,
   initializeAccountStore,
   InvalidCredentialsError,
   loginAccount,
+  PasswordChangeNotAllowedError,
+  PasswordExpiredError,
   registerAccount,
   usesManagedAccountStore
 } from "./storage/accounts.js";
@@ -58,7 +62,6 @@ app.use((_req, res, next) => {
 
 app.use(helmet());
 app.use(express.json({ limit: "64kb" }));
-app.use(express.static(publicDir));
 
 const oauthCookieName = "scanneraz_amazon_oauth_state";
 const apiRateLimit = rateLimit({
@@ -130,12 +133,21 @@ function getCookie(req: express.Request, name: string) {
   return cookie ? decodeURIComponent(cookie.slice(name.length + 1)) : undefined;
 }
 
-app.get("/", (_req, res) => {
-  res.sendFile(path.join(publicDir, "index.html"));
+app.get("/health", (_req, res) => {
+  // Render reaches this path directly for its platform health check. It exposes
+  // no account, application, or Amazon information.
+  res.setHeader("cache-control", "no-store");
+  res.json({ ok: true });
 });
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+// Once SCANNERAZ_EDGE_SHARED_SECRET is set, Render accepts public traffic only
+// from the fixed-origin Cloudflare Worker. Keep /health above this middleware
+// so the Render health probe can continue to reach the service directly.
+app.use(requireTrustedEdge);
+app.use(express.static(publicDir));
+
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(publicDir, "index.html"));
 });
 
 app.use("/api/keepa", keepaRouter);
@@ -190,6 +202,14 @@ app.post("/auth/scanneraz/login", requirePublicAppAccess, accountRateLimit, asyn
     });
     sendSession(res, session);
   } catch (error) {
+    if (error instanceof PasswordExpiredError) {
+      res.status(403).json({
+        error: "Password has expired. Contact ScannerAz support to reset it.",
+        requestId: res.locals.requestId
+      });
+      return;
+    }
+
     if (error instanceof InvalidCredentialsError) {
       res.status(401).json({ error: "Invalid email or password." });
       return;
@@ -203,6 +223,45 @@ app.post("/auth/scanneraz/login", requirePublicAppAccess, accountRateLimit, asyn
     next(error);
   }
 });
+
+app.post(
+  "/auth/scanneraz/password",
+  markSensitiveResponse,
+  requirePublicAppAccess,
+  requireTenantSession,
+  accountRateLimit,
+  async (req, res, next) => {
+    try {
+      await changeAccountPassword({
+        userId: req.scannerazTenantSession!.userId,
+        currentPassword: String(req.body?.currentPassword ?? ""),
+        newPassword: String(req.body?.newPassword ?? "")
+      });
+      clearSessionCookie(res);
+      res.status(204).end();
+    } catch (error) {
+      if (error instanceof InvalidCredentialsError) {
+        res.status(401).json({ error: "Current password is invalid.", requestId: res.locals.requestId });
+        return;
+      }
+
+      if (error instanceof PasswordChangeNotAllowedError) {
+        res.status(400).json({
+          error: "The new password cannot be used yet.",
+          requestId: res.locals.requestId
+        });
+        return;
+      }
+
+      if (error instanceof Error && /password/i.test(error.message)) {
+        res.status(400).json({ error: "Password does not meet the requirements.", requestId: res.locals.requestId });
+        return;
+      }
+
+      next(error);
+    }
+  }
+);
 
 app.get("/auth/scanneraz/me", requirePublicAppAccess, requireTenantSession, (req, res) => {
   const session = req.scannerazTenantSession!;
@@ -389,6 +448,31 @@ function safeEqual(left: string, right: string) {
   const rightBuffer = Buffer.from(right, "utf8");
 
   return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function requireTrustedEdge(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const expectedSecret = config.SCANNERAZ_EDGE_SHARED_SECRET;
+
+  // Local development does not run behind the Cloudflare Worker. Production
+  // begins enforcing this boundary as soon as the Render secret is configured.
+  if (!expectedSecret) {
+    next();
+    return;
+  }
+
+  const suppliedSecret = req.get("x-scanneraz-edge-auth") ?? "";
+
+  if (!suppliedSecret || !safeEqual(suppliedSecret, expectedSecret)) {
+    recordSecurityEvent("security.untrusted_origin_rejected", req, res);
+    res.setHeader("cache-control", "no-store, private, max-age=0");
+    res.status(403).json({
+      error: "ScannerAz requests must use the configured public endpoint.",
+      requestId: res.locals.requestId
+    });
+    return;
+  }
+
+  next();
 }
 
 function requireOperatorAccess(req: express.Request, res: express.Response, next: express.NextFunction) {

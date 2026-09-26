@@ -46,6 +46,7 @@ on the free plan.
 | `AMAZON_SP_API_ENVIRONMENT` | non-secret | Render group | `sandbox` while the Amazon app is Sandbox. It returns mock responses. Change to `production` only after approval and a controlled pilot. |
 | `ENCRYPTION_KEY` | secret | Render-generated | Encrypts Amazon refresh tokens at rest. Rotation requires a deliberate token migration plan. |
 | `SESSION_SECRET` | secret | Render-generated | Signs OAuth state. Rotation invalidates outstanding OAuth state. |
+| `SCANNERAZ_EDGE_SHARED_SECRET` | secret | Render and Cloudflare Worker | Same high-entropy value in both secret managers. It authenticates the Worker to the Render origin and is not an end-user credential. |
 | `SCANNERAZ_OPERATOR_TOKEN` | secret | Render secret manager | Add only when operator-only Amazon routes are intentionally enabled. |
 | `AMAZON_LWA_CLIENT_ID`, `AMAZON_LWA_CLIENT_SECRET`, `AMAZON_SP_API_APP_ID` | secret | Render secret manager | Add only after Amazon approves the public app and roles. |
 | `SCANNERAZ_PUBLIC_APP_ENABLED` | non-secret feature flag | Render group | Keep `false` until the Amazon security launch gate is complete. |
@@ -65,8 +66,13 @@ compiled into the mobile application and are visible to users.
    `scanneraz-api`.
 4. Let Render generate `ENCRYPTION_KEY` and `SESSION_SECRET` in its secret
    manager. Do not export their values to a local file.
-5. Keep both public feature flags `false`; deploy and confirm `/health` returns
-   `200`.
+5. After the application code that recognizes the edge secret is deployed,
+   create one high-entropy `SCANNERAZ_EDGE_SHARED_SECRET`. Set it first as a
+   Cloudflare Worker secret while the old Worker still ignores it, deploy the
+   Worker source that sends the header, and only then set the matching Render
+   service secret. This order avoids a public outage. Keep both public feature
+   flags `false`; confirm `/health` returns `200` through the public hostname,
+   HTTP redirects to HTTPS, and the direct origin rejects non-health paths.
 6. Inspect the service logs for successful schema initialization. The service
    creates only its `scanneraz_*` tables.
 7. Before enabling seller OAuth, configure the WAF/firewall, threat detection,

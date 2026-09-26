@@ -24,14 +24,13 @@ repository.
 
 ## Website to provide during registration
 
-Temporary review URL while the custom domain is being configured:
+Production review URL:
 
-`https://scanneraz-api.onrender.com/scanneraz/`
+`https://scanneraz.warasoft.com/scanneraz/`
 
 The site describes ScannerAz, DRECOM LLC, product scope, pricing, privacy,
-security, support, and data deletion. Before Appstore launch, replace this
-temporary URL with the production company subdomain and verify every page is
-publicly reachable over HTTPS.
+security, support, and data deletion. Verify every page is publicly reachable
+over HTTPS immediately before submission.
 
 ## Contact information
 

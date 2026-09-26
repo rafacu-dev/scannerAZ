@@ -55,6 +55,9 @@ Complete and retain evidence for every item below.
       tokens.
 - [ ] `SCANNERAZ_OPERATOR_TOKEN` is stored only in the server-side secret
       manager. It is not embedded in Expo or exposed to a browser.
+- [ ] `SCANNERAZ_EDGE_SHARED_SECRET` is stored only in the Cloudflare Worker
+      and Render secret managers, and a direct-origin request to any non-health
+      path is rejected after the Worker deployment.
 
 The architecture and source evidence are now documented, but the checklist
 must remain incomplete until the required provider screenshots, monitoring
@@ -69,8 +72,9 @@ deployment rather than aspirational controls.
 
 ### Network security controls
 
-> ScannerAz is a private SP-API application used only by [organization name]
-> for product eligibility and pricing workflows. Production traffic is
+> ScannerAz is a public SP-API application for Amazon selling partners that
+> use product eligibility and pricing workflows. Each seller explicitly
+> authorizes only their own Amazon account through OAuth. Production traffic is
 > encrypted with TLS 1.2+ and passes through [WAF/firewall provider] with
 > managed application-protection rules. The production API is isolated from
 > development, and Amazon refresh tokens are stored only in [private managed

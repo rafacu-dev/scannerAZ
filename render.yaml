@@ -47,6 +47,10 @@ services:
         generateValue: true
       - key: SESSION_SECRET
         generateValue: true
+      # Set manually in Render and mirror it as a Worker secret in Cloudflare.
+      # Do not put its value in this Blueprint or repository.
+      - key: SCANNERAZ_EDGE_SHARED_SECRET
+        sync: false
 
 databases:
   - name: scanneraz-db
