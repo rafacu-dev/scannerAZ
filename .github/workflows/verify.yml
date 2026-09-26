@@ -24,7 +24,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y clamav
-          sudo freshclam --stdout
+          # Ubuntu starts the freshclam daemon during package installation.
+          # Stop it before the one-shot update so it cannot retain the log lock.
+          sudo systemctl stop clamav-freshclam || true
+          sudo freshclam --stdout --log=/tmp/freshclam.log
           git ls-files -z | xargs -0 -r clamscan --no-summary --infected --
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
