@@ -51,6 +51,7 @@ on the free plan.
 | `AMAZON_LWA_CLIENT_ID`, `AMAZON_LWA_CLIENT_SECRET`, `AMAZON_SP_API_APP_ID` | secret | Render secret manager | Add only after Amazon approves the public app and roles. |
 | `SCANNERAZ_PUBLIC_APP_ENABLED` | non-secret feature flag | Render group | Keep `false` until the Amazon security launch gate is complete. |
 | `SCANNERAZ_PUBLIC_SIGNUP_ENABLED` | non-secret feature flag | Render group | Keep `false` until registration, reset, and verification operations are ready. |
+| `SCANNERAZ_PRICE_UPDATES_ENABLED` | non-secret feature flag | Render group | Keep `false` during pricing review and pilot validation. Enable only after Amazon grants Pricing and Product Listing roles, the seller reauthorizes, and a controlled write test succeeds. |
 
 Never use a `SECRET`, `TOKEN`, client secret, database URL, refresh token, or
 operator token in an `EXPO_PUBLIC_*` variable. `EXPO_PUBLIC_*` values are

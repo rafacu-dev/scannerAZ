@@ -67,6 +67,8 @@ tenant-scoped eligibility check:
 - `POST /api/public/amazon/connections/:connectionId/catalog/search`
 - `POST /api/public/amazon/connections/:connectionId/restrictions/check`
 - `POST /api/public/amazon/connections/:connectionId/restrictions/check-batch`
+- `GET /api/public/amazon/connections/:connectionId/listings/pricing`
+- `POST /api/public/amazon/connections/:connectionId/listings/pricing/match-buy-box`
 - `DELETE /api/public/amazon/connections/:connectionId`
 
 Enable this surface only when all four prerequisites are true:
@@ -84,6 +86,12 @@ Registration additionally requires `SCANNERAZ_PUBLIC_SIGNUP_ENABLED=true`.
 The returned ScannerAz session token is not an Amazon credential; the mobile
 client must keep it in secure device storage, never AsyncStorage or an
 `EXPO_PUBLIC_*` setting.
+
+The pricing route validates seller-selected changes against Amazon's current
+listing state and defaults to preview mode. It never writes a price unless the
+client explicitly confirms the reviewed batch and the server-only
+`SCANNERAZ_PRICE_UPDATES_ENABLED=true` flag has been enabled after a controlled
+Amazon pilot.
 
 The mobile Amazon authorization flow first creates a single-use, five-minute
 handoff ticket. It binds the external browser to the authenticated tenant

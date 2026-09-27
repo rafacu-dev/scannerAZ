@@ -24,6 +24,10 @@ envVarGroups:
         value: "false"
       - key: SCANNERAZ_PUBLIC_SIGNUP_ENABLED
         value: "false"
+      # Price changes require an explicit production opt-in after the Amazon
+      # app has the required Pricing and Product Listing roles.
+      - key: SCANNERAZ_PRICE_UPDATES_ENABLED
+        value: "false"
 
 services:
   - type: web

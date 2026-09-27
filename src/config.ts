@@ -30,6 +30,12 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  // Price writes are deliberately opt-in. Previewing a price batch remains
+  // possible, but production listing prices cannot change until this is set.
+  SCANNERAZ_PRICE_UPDATES_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   KEEPA_API_KEY: z.string().min(1).optional(),
   TARGET_PROVIDER: z.enum(["public-web", "unwrangle"]).default("public-web"),
   TARGET_API_KEY: z.string().min(1).optional(),

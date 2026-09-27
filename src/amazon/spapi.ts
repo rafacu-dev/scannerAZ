@@ -71,6 +71,40 @@ type CatalogSearchResponse = {
   items?: unknown[];
 };
 
+type SellerListingsSearchResponse = {
+  items?: unknown[];
+  pagination?: {
+    nextToken?: string;
+  };
+};
+
+export type AmazonPricingListing = {
+  sku: string;
+  asin?: string;
+  title?: string;
+  productType?: string;
+  price?: number;
+  currency?: string;
+};
+
+export type PreparedListingPriceUpdate = {
+  sku: string;
+  asin?: string;
+  title?: string;
+  productType: string;
+  currentPrice?: number;
+  targetPrice: number;
+  currency: string;
+  patch: {
+    productType: string;
+    patches: Array<{
+      op: "replace";
+      path: "/attributes/purchasable_offer";
+      value: Array<Record<string, unknown>>;
+    }>;
+  };
+};
+
 export type RestrictionStatus = "sellable" | "approval_required" | "blocked" | "unknown";
 
 export async function getLwaAccessToken(refreshToken: string) {
@@ -178,6 +212,241 @@ export async function searchCatalogItems(input: {
   return parsedBody as CatalogSearchResponse;
 }
 
+/** Return the seller's own listings. The SKU is required before a price can be changed. */
+export async function searchSellerListings(input: {
+  sellerId: string;
+  refreshToken: string;
+  accessToken?: string;
+  marketplaceId?: string;
+  pageSize?: number;
+  pageToken?: string;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL(
+    `/listings/2021-08-01/items/${encodeURIComponent(input.sellerId)}`,
+    endpoint
+  );
+
+  url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+  url.searchParams.set("includedData", "summaries,attributes,productTypes");
+  url.searchParams.set("issueLocale", "en_US");
+  url.searchParams.set("pageSize", String(Math.max(1, Math.min(input.pageSize ?? 20, 20))));
+
+  if (input.pageToken) {
+    url.searchParams.set("pageToken", input.pageToken);
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      "user-agent": "ScannerAz/0.1.0 (Language=Node.js; Platform=backend)",
+      "x-amz-access-token": accessToken,
+      "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "")
+    }
+  });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Listings Items", response.status, parsedBody, "Pricing and Product Listing"));
+  }
+
+  return parsedBody as SellerListingsSearchResponse;
+}
+
+export async function getSellerListingItem(input: {
+  sellerId: string;
+  sku: string;
+  refreshToken: string;
+  accessToken?: string;
+  marketplaceId?: string;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL(
+    `/listings/2021-08-01/items/${encodeURIComponent(input.sellerId)}/${encodeURIComponent(input.sku)}`,
+    endpoint
+  );
+
+  url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+  url.searchParams.set("includedData", "summaries,attributes,productTypes");
+  url.searchParams.set("issueLocale", "en_US");
+
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      "user-agent": "ScannerAz/0.1.0 (Language=Node.js; Platform=backend)",
+      "x-amz-access-token": accessToken,
+      "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "")
+    }
+  });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Listings Items", response.status, parsedBody, "Pricing and Product Listing"));
+  }
+
+  return parsedBody;
+}
+
+export async function patchSellerListingPrice(input: {
+  sellerId: string;
+  sku: string;
+  refreshToken: string;
+  accessToken?: string;
+  marketplaceId?: string;
+  patch: PreparedListingPriceUpdate["patch"];
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL(
+    `/listings/2021-08-01/items/${encodeURIComponent(input.sellerId)}/${encodeURIComponent(input.sku)}`,
+    endpoint
+  );
+
+  url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+  url.searchParams.set("issueLocale", "en_US");
+
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "user-agent": "ScannerAz/0.1.0 (Language=Node.js; Platform=backend)",
+      "x-amz-access-token": accessToken,
+      "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "")
+    },
+    body: JSON.stringify(input.patch)
+  });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon price update", response.status, parsedBody, "Pricing and Product Listing"));
+  }
+
+  return parsedBody;
+}
+
+export function normalizePricingListings(
+  response: SellerListingsSearchResponse,
+  marketplaceId = config.AMAZON_MARKETPLACE_ID
+) {
+  const seenSkus = new Set<string>();
+  const listings = (response.items ?? []).flatMap((rawItem) => {
+    const item = asRecord(rawItem);
+    const sku = stringValue(item?.sku);
+
+    if (!sku || seenSkus.has(sku)) {
+      return [];
+    }
+
+    seenSkus.add(sku);
+    const summary = marketplaceRecord(item?.summaries, marketplaceId);
+    const productType = listingProductType(item, marketplaceId);
+    const offer = matchingPurchasableOffer(item?.attributes, marketplaceId);
+    const price = priceFromPurchasableOffer(offer);
+    const currency = stringValue(offer?.currency) ?? "USD";
+
+    return [{
+      sku,
+      asin: stringValue(summary?.asin),
+      title: stringValue(summary?.itemName) ?? stringValue(summary?.item_name),
+      productType,
+      price,
+      currency
+    } satisfies AmazonPricingListing];
+  });
+
+  const pagination = asRecord(response.pagination);
+  return {
+    listings,
+    nextPageToken: stringValue(pagination?.nextToken)
+  };
+}
+
+/**
+ * Build a price-only patch from the listing currently held by Amazon. Keeping
+ * the existing purchasable_offer object preserves any sale schedule or fields
+ * that ScannerAz is not responsible for.
+ */
+export function prepareListingPriceUpdate(
+  rawListing: unknown,
+  marketplaceId: string,
+  targetPrice: number
+): PreparedListingPriceUpdate {
+  const listing = asRecord(rawListing);
+  const sku = stringValue(listing?.sku);
+  const productType = listingProductType(listing, marketplaceId);
+
+  if (!sku || !productType) {
+    throw new Error("Amazon did not return the SKU and product type required to update this price.");
+  }
+
+  const summary = marketplaceRecord(listing?.summaries, marketplaceId);
+  const originalOffers = recordArray(asRecord(listing?.attributes)?.purchasable_offer);
+  const offerIndex = originalOffers.findIndex((offer) => isMatchingPurchasableOffer(offer, marketplaceId));
+
+  if (offerIndex < 0) {
+    throw new Error("Amazon did not return a purchasable offer for this SKU.");
+  }
+
+  const currentOffer = originalOffers[offerIndex];
+  const currentPrice = priceFromPurchasableOffer(currentOffer);
+  const currency = stringValue(currentOffer.currency) ?? "USD";
+  const updatedOffers = cloneJson(originalOffers);
+  const updatedOffer = updatedOffers[offerIndex];
+
+  if (!stringValue(updatedOffer.marketplace_id)) {
+    updatedOffer.marketplace_id = marketplaceId;
+  }
+
+  if (!stringValue(updatedOffer.currency)) {
+    updatedOffer.currency = currency;
+  }
+
+  const ourPrices = recordArray(updatedOffer.our_price);
+  const priceEntry = ourPrices[0] ?? {};
+  const schedules = recordArray(priceEntry.schedule);
+  const activeScheduleIndex = schedules.findIndex((schedule) => !schedule.start_at && !schedule.end_at);
+  const scheduleIndex = activeScheduleIndex >= 0 ? activeScheduleIndex : 0;
+  const nextSchedule = {
+    ...(schedules[scheduleIndex] ?? {}),
+    value_with_tax: targetPrice
+  };
+  const nextSchedules = schedules.length
+    ? schedules.map((schedule, index) => index === scheduleIndex ? nextSchedule : schedule)
+    : [nextSchedule];
+  const nextOurPrice = {
+    ...priceEntry,
+    schedule: nextSchedules
+  };
+
+  updatedOffer.our_price = ourPrices.length
+    ? ourPrices.map((value, index) => index === 0 ? nextOurPrice : value)
+    : [nextOurPrice];
+
+  return {
+    sku,
+    asin: stringValue(summary?.asin),
+    title: stringValue(summary?.itemName) ?? stringValue(summary?.item_name),
+    productType,
+    currentPrice,
+    targetPrice,
+    currency,
+    patch: {
+      productType,
+      patches: [{
+        op: "replace",
+        path: "/attributes/purchasable_offer",
+        value: updatedOffers
+      }]
+    }
+  };
+}
+
 export function inferCatalogIdentifierType(value: string): CatalogIdentifierType | undefined {
   const normalized = value.trim().toUpperCase();
 
@@ -252,6 +521,77 @@ function parseJsonBody(body: string) {
   }
 }
 
+function recordArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.map(asRecord).filter((record): record is Record<string, unknown> => Boolean(record))
+    : [];
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function listingProductType(value: unknown, marketplaceId: string) {
+  const item = asRecord(value);
+  const productTypes = recordArray(item?.productTypes);
+  const matchingType = productTypes.find((entry) => {
+    const entryMarketplaceId = stringValue(entry.marketplaceId) ?? stringValue(entry.marketplace_id);
+    return !entryMarketplaceId || entryMarketplaceId === marketplaceId;
+  }) ?? productTypes[0];
+  const summary = marketplaceRecord(item?.summaries, marketplaceId);
+
+  return stringValue(matchingType?.productType) ??
+    stringValue(matchingType?.product_type) ??
+    stringValue(summary?.productType) ??
+    stringValue(summary?.product_type);
+}
+
+function isMatchingPurchasableOffer(offer: Record<string, unknown>, marketplaceId: string) {
+  const offerMarketplaceId = stringValue(offer.marketplace_id) ?? stringValue(offer.marketplaceId);
+  const audience = stringValue(offer.audience)?.toUpperCase();
+
+  return (!offerMarketplaceId || offerMarketplaceId === marketplaceId) &&
+    (!audience || audience === "ALL");
+}
+
+function matchingPurchasableOffer(attributes: unknown, marketplaceId: string) {
+  const offers = recordArray(asRecord(attributes)?.purchasable_offer);
+
+  return offers.find((offer) => isMatchingPurchasableOffer(offer, marketplaceId)) ??
+    offers.find((offer) => {
+      const offerMarketplaceId = stringValue(offer.marketplace_id) ?? stringValue(offer.marketplaceId);
+      return !offerMarketplaceId || offerMarketplaceId === marketplaceId;
+    }) ??
+    offers[0];
+}
+
+function numericValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
+}
+
+function priceFromPurchasableOffer(offer?: Record<string, unknown>) {
+  for (const price of recordArray(offer?.our_price)) {
+    const schedules = recordArray(price.schedule);
+    const activeSchedule = schedules.find((schedule) => !schedule.start_at && !schedule.end_at) ?? schedules[0];
+    const amount = numericValue(activeSchedule?.value_with_tax);
+
+    if (amount !== undefined) {
+      return amount;
+    }
+  }
+
+  return undefined;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -310,11 +650,16 @@ function catalogImageUrl(value: unknown, marketplaceId: string) {
   return stringValue(image?.link);
 }
 
-function formatSpApiError(operation: string, status: number, body: unknown) {
+function formatSpApiError(
+  operation: string,
+  status: number,
+  body: unknown,
+  requiredRole = "Product Listing"
+) {
   const payload = typeof body === "string" ? body : JSON.stringify(body);
 
   if (status === 401 || status === 403) {
-    return `${operation} failed: ${status}. Check that the refresh token belongs to this SP-API app, the seller has authorized it, and the app has the required Product Listing role. Body: ${payload}`;
+    return `${operation} failed: ${status}. Check that the refresh token belongs to this SP-API app, the seller has authorized it, and the app has the required ${requiredRole} role. Body: ${payload}`;
   }
 
   if (status === 429) {
