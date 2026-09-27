@@ -61,8 +61,12 @@ tenant-scoped eligibility check:
 - `GET /auth/scanneraz/me`
 - `POST /auth/scanneraz/logout`
 - `GET /auth/amazon/connect`
+- `POST /auth/amazon/mobile/handoff`
+- `GET /auth/amazon/mobile/connect`
 - `GET /api/public/amazon/connections`
+- `POST /api/public/amazon/connections/:connectionId/catalog/search`
 - `POST /api/public/amazon/connections/:connectionId/restrictions/check`
+- `POST /api/public/amazon/connections/:connectionId/restrictions/check-batch`
 - `DELETE /api/public/amazon/connections/:connectionId`
 
 Enable this surface only when all four prerequisites are true:
@@ -80,3 +84,8 @@ Registration additionally requires `SCANNERAZ_PUBLIC_SIGNUP_ENABLED=true`.
 The returned ScannerAz session token is not an Amazon credential; the mobile
 client must keep it in secure device storage, never AsyncStorage or an
 `EXPO_PUBLIC_*` setting.
+
+The mobile Amazon authorization flow first creates a single-use, five-minute
+handoff ticket. It binds the external browser to the authenticated tenant
+without placing the ScannerAz session token in a URL. Amazon refresh tokens,
+LWA credentials, and SP-API responses remain server-side.

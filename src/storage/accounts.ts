@@ -4,6 +4,7 @@ import { config } from "../config.js";
 import { hashPassword, verifyPassword } from "../auth/passwords.js";
 
 const sessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
+const amazonMobileHandoffLifetimeMs = 5 * 60 * 1000;
 const passwordMaximumAgeMs = 365 * 24 * 60 * 60 * 1000;
 const passwordMinimumAgeMs = 24 * 60 * 60 * 1000;
 const loginLockThreshold = 8;
@@ -38,6 +39,11 @@ type SessionRow = {
   tenant_id: string;
   email: string;
   role: "owner" | "member";
+  expires_at: Date | string;
+};
+
+type AmazonMobileHandoffRow = {
+  tenant_id: string;
   expires_at: Date | string;
 };
 
@@ -136,6 +142,16 @@ export async function initializeAccountStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_sessions_expires_at_idx
       ON scanneraz_sessions (expires_at);
+
+      CREATE TABLE IF NOT EXISTS scanneraz_amazon_mobile_handoffs (
+        ticket_hash TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_amazon_mobile_handoffs_expires_at_idx
+      ON scanneraz_amazon_mobile_handoffs (expires_at);
     `)
     .then(() => undefined)
     .catch((error: unknown) => {
@@ -397,6 +413,65 @@ export async function deleteTenantSession(accessToken: string) {
   await accountPool.query("DELETE FROM scanneraz_sessions WHERE token_hash = $1", [
     hashSessionToken(accessToken)
   ]);
+}
+
+/**
+ * A mobile OAuth handoff is an opaque, single-use ticket. It conveys only the
+ * tenant binding to the external browser, never the ScannerAz session token.
+ */
+export async function createAmazonMobileHandoff(tenantId: string) {
+  if (!/^[a-f0-9-]{36}$/i.test(tenantId)) {
+    throw new Error("Invalid tenant for Amazon mobile handoff");
+  }
+
+  const accountPool = requirePool();
+  await initializeAccountStore();
+  const ticket = crypto.randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + amazonMobileHandoffLifetimeMs);
+
+  await accountPool.query(
+    `
+      DELETE FROM scanneraz_amazon_mobile_handoffs
+      WHERE expires_at <= NOW()
+    `
+  );
+  await accountPool.query(
+    `
+      INSERT INTO scanneraz_amazon_mobile_handoffs (ticket_hash, tenant_id, expires_at, created_at)
+      VALUES ($1, $2, $3, $4)
+    `,
+    [hashSessionToken(ticket), tenantId, expiresAt, new Date()]
+  );
+
+  return { ticket, expiresAt: expiresAt.toISOString() };
+}
+
+export async function consumeAmazonMobileHandoff(ticket: string) {
+  if (ticket.length < 40 || ticket.length > 200) {
+    return undefined;
+  }
+
+  const accountPool = requirePool();
+  await initializeAccountStore();
+  const result = await accountPool.query<AmazonMobileHandoffRow>(
+    `
+      DELETE FROM scanneraz_amazon_mobile_handoffs
+      WHERE ticket_hash = $1
+        AND expires_at > NOW()
+      RETURNING tenant_id, expires_at
+    `,
+    [hashSessionToken(ticket)]
+  );
+  const handoff = result.rows[0];
+
+  if (!handoff) {
+    return undefined;
+  }
+
+  return {
+    tenantId: handoff.tenant_id,
+    expiresAt: new Date(handoff.expires_at).toISOString()
+  };
 }
 
 function getPool() {

@@ -40,12 +40,13 @@ The backend has a signed OAuth state flow, AES-256-GCM refresh-token
 encryption, a PostgreSQL connection store, and connection IDs. It also now has
 the backend foundation for ScannerAz user accounts, password hashing,
 tenant-scoped sessions, tenant-bound OAuth state, and tenant-scoped connection
-and listing-restriction routes. This public surface is disabled by default and
-cannot operate in production without a managed database.
+and listing-restriction routes. The mobile client can sign in, store only its
+ScannerAz session token in device secure storage, and start Amazon OAuth with a
+five-minute, single-use handoff ticket. This public surface is disabled by
+default and cannot operate in production without a managed database.
 
-Before external sellers can use ScannerAz, implement:
+Before external sellers can use ScannerAz broadly, implement:
 
-- The Expo account, sign-in, connection-management, and disconnect screens.
 - Email verification, password-reset, and account-recovery workflows.
 - Authorization event logs that exclude tokens and credentials.
 - Rate limits and quotas per tenant, seller account, and feature.

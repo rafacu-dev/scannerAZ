@@ -6,6 +6,7 @@ export type AmazonOAuthState = {
   nonce: string;
   createdAt: string;
   tenantId?: string;
+  mobile?: boolean;
 };
 
 const authorizationHosts: Record<typeof config.AMAZON_REGION, string> = {
@@ -23,15 +24,20 @@ export type AmazonWebsiteLoginRequest = {
   createdAt: string;
 };
 
-export function createOAuthState(input: { tenantId?: string } = {}): AmazonOAuthState {
+export function createOAuthState(input: { tenantId?: string; mobile?: boolean } = {}): AmazonOAuthState {
   if (input.tenantId && !/^[a-f0-9-]{36}$/i.test(input.tenantId)) {
     throw new Error("Invalid OAuth tenant state");
+  }
+
+  if (input.mobile && !input.tenantId) {
+    throw new Error("Mobile OAuth state requires a tenant");
   }
 
   return {
     nonce: crypto.randomBytes(24).toString("base64url"),
     createdAt: new Date().toISOString(),
-    ...(input.tenantId ? { tenantId: input.tenantId } : {})
+    ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+    ...(input.mobile ? { mobile: true } : {})
   };
 }
 
@@ -53,7 +59,9 @@ export function decodeState(value: string): AmazonOAuthState {
     typeof parsed?.nonce !== "string" ||
     typeof parsed?.createdAt !== "string" ||
     (parsed?.tenantId !== undefined &&
-      (typeof parsed.tenantId !== "string" || !/^[a-f0-9-]{36}$/i.test(parsed.tenantId)))
+      (typeof parsed.tenantId !== "string" || !/^[a-f0-9-]{36}$/i.test(parsed.tenantId))) ||
+    (parsed?.mobile !== undefined && typeof parsed.mobile !== "boolean") ||
+    (parsed?.mobile === true && !parsed?.tenantId)
   ) {
     throw new Error("Invalid OAuth state");
   }

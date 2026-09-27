@@ -9,7 +9,10 @@ process.env.SESSION_SECRET = "s".repeat(32);
 
 const {
   createAmazonWebsiteLoginRequest,
+  createOAuthState,
+  decodeState,
   decodeAmazonWebsiteLoginRequest,
+  encodeState,
   encodeAmazonWebsiteLoginRequest
 } = await import("./oauth.js");
 
@@ -48,4 +51,14 @@ test("encrypts and verifies the website authorization handoff", () => {
   assert.equal(decoded.amazonState, request.amazonState);
   assert.equal(decoded.amazonCallbackUri, request.amazonCallbackUri);
   assert.throws(() => decodeAmazonWebsiteLoginRequest(`${encoded}tampered`));
+});
+
+test("binds a mobile authorization state to one tenant", () => {
+  const tenantId = "b067dc08-dcc4-41c4-a848-bc911765af3f";
+  const state = createOAuthState({ tenantId, mobile: true });
+  const decoded = decodeState(encodeState(state));
+
+  assert.equal(decoded.tenantId, tenantId);
+  assert.equal(decoded.mobile, true);
+  assert.throws(() => createOAuthState({ mobile: true }), /requires a tenant/);
 });

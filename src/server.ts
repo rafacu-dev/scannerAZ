@@ -34,6 +34,8 @@ import {
 import {
   AccountAlreadyExistsError,
   changeAccountPassword,
+  consumeAmazonMobileHandoff,
+  createAmazonMobileHandoff,
   initializeAccountStore,
   InvalidCredentialsError,
   loginAccount,
@@ -220,6 +222,47 @@ function renderAmazonWebsiteLoginError() {
   <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connection expired | ScannerAz</title></head>
   <body><main><h1>Connection request expired</h1><p>Return to ScannerAz and start the Amazon connection again.</p></main></body>
 </html>`;
+}
+
+function renderAmazonMobileHandoffError() {
+  return `<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connection expired | ScannerAz</title></head>
+  <body><main><h1>Connection request expired</h1><p>Return to ScannerAz and begin the Amazon connection again.</p></main></body>
+</html>`;
+}
+
+function sendAmazonMobileConnectionComplete(
+  res: express.Response,
+  input: { connectionId?: string; sellerId?: string; status: "connected" | "failed" }
+) {
+  const mobileUrl = new URL("scanneraz://amazon-connected");
+  mobileUrl.searchParams.set("status", input.status);
+
+  if (input.connectionId) {
+    mobileUrl.searchParams.set("connectionId", input.connectionId);
+  }
+
+  if (input.sellerId) {
+    mobileUrl.searchParams.set("sellerId", input.sellerId);
+  }
+
+  const encodedMobileUrl = JSON.stringify(mobileUrl.toString());
+  res.setHeader("cache-control", "no-store, private, max-age=0");
+  res.type("html").send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Amazon connected | ScannerAz</title>
+    <style>body { align-items: center; background: #f4f6f8; color: #17202a; display: flex; font-family: Arial, sans-serif; justify-content: center; margin: 0; min-height: 100vh; } main { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; max-width: 360px; padding: 28px; text-align: center; } h1 { margin: 0 0 10px; } p { color: #687385; line-height: 1.5; margin: 0; }</style>
+  </head>
+  <body>
+    <main><h1>${input.status === "connected" ? "Amazon connected" : "Connection not completed"}</h1><p>Returning to ScannerAz.</p></main>
+    <script>window.location.replace(${encodedMobileUrl});</script>
+  </body>
+</html>`);
 }
 
 function isAmazonWebsiteLoginRequestError(error: unknown) {
@@ -461,6 +504,46 @@ app.post(
   }
 );
 
+app.post(
+  "/auth/amazon/mobile/handoff",
+  requirePublicAppAccess,
+  requireTenantSession,
+  async (req, res, next) => {
+    try {
+      assertAmazonOAuthConfig();
+      assertOAuthSecurityConfig();
+      const handoff = await createAmazonMobileHandoff(req.scannerazTenantSession!.tenantId);
+      const url = new URL("/auth/amazon/mobile/connect", config.APP_BASE_URL);
+      url.searchParams.set("ticket", handoff.ticket);
+      res.setHeader("cache-control", "no-store, private, max-age=0");
+      res.json({ url: url.toString(), expiresAt: handoff.expiresAt });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+app.get("/auth/amazon/mobile/connect", requirePublicAppAccess, async (req, res, next) => {
+  try {
+    assertAmazonOAuthConfig();
+    assertOAuthSecurityConfig();
+    const ticket = String(req.query.ticket ?? "");
+    const handoff = await consumeAmazonMobileHandoff(ticket);
+
+    if (!handoff) {
+      res.status(400).type("html").send(renderAmazonMobileHandoffError());
+      return;
+    }
+
+    const state = encodeState(createOAuthState({ tenantId: handoff.tenantId, mobile: true }));
+    res.cookie(oauthCookieName, state, getOAuthCookieOptions());
+    res.setHeader("cache-control", "no-store, private, max-age=0");
+    res.redirect(getAmazonAuthorizationUrl(state));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/auth/amazon/connect", requirePublicAppAccess, requireTenantSession, (req, res, next) => {
   try {
     assertAmazonOAuthConfig();
@@ -501,6 +584,11 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
     }
 
     if (!code) {
+      if (oauthState.mobile) {
+        sendAmazonMobileConnectionComplete(res, { status: "failed" });
+        return;
+      }
+
       res.status(400).json({ error: "Missing Amazon authorization code" });
       return;
     }
@@ -508,6 +596,11 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
     const tokenResponse = await exchangeAuthorizationCode(code);
 
     if (!tokenResponse.refresh_token) {
+      if (oauthState.mobile) {
+        sendAmazonMobileConnectionComplete(res, { status: "failed" });
+        return;
+      }
+
       res.status(400).json({ error: "Amazon did not return a refresh token" });
       return;
     }
@@ -521,6 +614,15 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
       refreshToken: tokenResponse.refresh_token,
       connectedAt: new Date().toISOString()
     });
+
+    if (oauthState.mobile) {
+      sendAmazonMobileConnectionComplete(res, {
+        status: "connected",
+        connectionId: id,
+        sellerId: sellingPartnerId
+      });
+      return;
+    }
 
     res.json({
       ok: true,
