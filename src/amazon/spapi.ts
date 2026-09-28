@@ -220,6 +220,7 @@ export async function searchSellerListings(input: {
   marketplaceId?: string;
   pageSize?: number;
   pageToken?: string;
+  withStatus?: "BUYABLE" | "DISCOVERABLE";
 }) {
   const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
   const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
@@ -232,6 +233,10 @@ export async function searchSellerListings(input: {
   url.searchParams.set("includedData", "summaries,attributes,productTypes");
   url.searchParams.set("issueLocale", "en_US");
   url.searchParams.set("pageSize", String(Math.max(1, Math.min(input.pageSize ?? 20, 20))));
+
+  if (input.withStatus) {
+    url.searchParams.set("withStatus", input.withStatus);
+  }
 
   if (input.pageToken) {
     url.searchParams.set("pageToken", input.pageToken);
@@ -338,13 +343,13 @@ export function normalizePricingListings(
   const listings = (response.items ?? []).flatMap((rawItem) => {
     const item = asRecord(rawItem);
     const sku = stringValue(item?.sku);
+    const summary = marketplaceRecord(item?.summaries, marketplaceId);
 
-    if (!sku || seenSkus.has(sku)) {
+    if (!sku || seenSkus.has(sku) || !listingSummaryIsBuyable(summary)) {
       return [];
     }
 
     seenSkus.add(sku);
-    const summary = marketplaceRecord(item?.summaries, marketplaceId);
     const productType = listingProductType(item, marketplaceId);
     const offer = matchingPurchasableOffer(item?.attributes, marketplaceId);
     const price = priceFromPurchasableOffer(offer);
@@ -608,6 +613,17 @@ function marketplaceRecord(value: unknown, marketplaceId: string) {
     : [];
 
   return records.find((record) => stringValue(record.marketplaceId) === marketplaceId) ?? records[0];
+}
+
+function listingSummaryIsBuyable(summary?: Record<string, unknown>) {
+  const statuses = Array.isArray(summary?.status)
+    ? summary.status
+        .map(stringValue)
+        .filter((status): status is string => Boolean(status))
+        .map((status) => status.toUpperCase())
+    : [];
+
+  return statuses.includes("BUYABLE");
 }
 
 function collectCatalogIdentifiers(value: unknown, marketplaceId: string) {

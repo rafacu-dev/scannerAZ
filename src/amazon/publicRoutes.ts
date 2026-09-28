@@ -244,7 +244,8 @@ publicAmazonRouter.get("/connections/:connectionId/listings/pricing", async (req
       refreshToken: connection.refreshToken,
       marketplaceId,
       pageSize,
-      pageToken: pageToken || undefined
+      pageToken: pageToken || undefined,
+      withStatus: "BUYABLE"
     });
     const normalized = normalizePricingListings(response, marketplaceId);
 

@@ -87,7 +87,8 @@ test("normalizes seller listings with their SKU, type, and current offer price",
           {
             marketplaceId: "ATVPDKIKX0DER",
             asin: "B0GSDRQN6L",
-            itemName: "Beautiful multi-cooker"
+            itemName: "Beautiful multi-cooker",
+            status: ["BUYABLE", "DISCOVERABLE"]
           }
         ],
         productTypes: [
@@ -100,6 +101,30 @@ test("normalizes seller listings with their SKU, type, and current offer price",
               audience: "ALL",
               currency: "USD",
               our_price: [{ schedule: [{ value_with_tax: 109.99 }] }]
+            }
+          ]
+        }
+      },
+      {
+        sku: "inactive-cooker",
+        summaries: [
+          {
+            marketplaceId: "ATVPDKIKX0DER",
+            asin: "B0INACTIVE",
+            itemName: "Inactive multi-cooker",
+            status: ["DISCOVERABLE"]
+          }
+        ],
+        productTypes: [
+          { marketplaceId: "ATVPDKIKX0DER", productType: "KITCHEN" }
+        ],
+        attributes: {
+          purchasable_offer: [
+            {
+              marketplace_id: "ATVPDKIKX0DER",
+              audience: "ALL",
+              currency: "USD",
+              our_price: [{ schedule: [{ value_with_tax: 19.99 }] }]
             }
           ]
         }
