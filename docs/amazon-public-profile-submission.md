@@ -15,7 +15,7 @@ Amazon Data Protection Policy (DPP) or Acceptable Use Policy (AUP).
 | Website | `https://scanneraz.warasoft.com/scanneraz/` |
 | Developer type | Public Developer |
 | Application | ScannerAz |
-| Initial roles | Product Listing; Pricing |
+| Initial roles | Product Listing; Pricing; Inventory and Order Tracking |
 | Public support | `Support.ScannerAz@drecom.dev` |
 
 The portal contact name, email, and telephone number must be a monitored,
@@ -27,9 +27,11 @@ repository.
 > ScannerAz is a mobile product-research application for Amazon selling
 > partners. It helps an authorized seller match retail products to Amazon
 > catalog records, review listing eligibility, and evaluate seller-facing
-> offer and pricing signals before making a sourcing decision. ScannerAz does
-> not process buyer, order, payment, tax, messaging, or shipping data in its
-> initial release.
+> offer and pricing signals before making a sourcing decision. ScannerAz also
+> reconciles invoice-backed stock with non-PII fulfillment data: order/item
+> IDs, seller SKU, ASIN, quantity, fulfillment state, and timestamps. It does
+> not process buyer, recipient, payment, tax, messaging, package, tracking, or
+> shipping-address data.
 
 ## Use case
 
@@ -38,7 +40,10 @@ repository.
 > match an ASIN, UPC, or product name to catalog candidates and to show the
 > seller whether the requested listing workflow has restrictions. ScannerAz
 > uses Pricing data to present seller-facing offer and price signals for the
-> candidate product. Each connection is scoped to a single ScannerAz tenant;
+> candidate product. ScannerAz uses Inventory and Order Tracking data only to
+> reconcile fulfilled order-item quantities against invoices that the seller
+> explicitly registers; it requests neither buyer nor recipient data. Each
+> connection is scoped to a single ScannerAz tenant;
 > the mobile client receives feature results only and never receives Amazon
 > client secrets, OAuth refresh tokens, or another seller's data. Sellers can
 > disconnect their Amazon connection and request deletion of stored

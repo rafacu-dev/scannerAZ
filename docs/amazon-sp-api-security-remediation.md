@@ -102,7 +102,9 @@ deployment rather than aspirational controls.
 2. Submit a new Developer Profile request. Amazon's prior case says not to
    reopen the closed case.
 3. After the required roles are approved, assign them to ScannerAz Dev:
-   `Product Listing` for eligibility and `Pricing` for pricing/offer data.
+   `Product Listing` for eligibility, `Pricing` for pricing/offer data, and
+   `Inventory and Order Tracking` for non-PII fulfilled-order inventory
+   reconciliation.
 4. Self-authorize the private app for the seller account, then generate a new
    refresh token. A refresh token issued before the role changes must not be
    reused for the updated permissions.
@@ -111,7 +113,9 @@ deployment rather than aspirational controls.
 
 ## Explicit non-goals
 
-- Do not request buyer PII, payments, messages, tax data, or order data for
-  the current ScannerAz use case.
+- Do not request buyer PII, recipient data, payments, messages, tax data,
+  packages, tracking, or shipping-address data. The order-tracking feature is
+  limited to seller-facing order/item identifiers, SKU/ASIN, quantity,
+  fulfillment state/channel, and timestamps.
 - Do not submit infrastructure screenshots, secrets, refresh tokens, or
   Amazon credentials to source control or chat.

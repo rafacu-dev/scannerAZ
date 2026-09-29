@@ -13,6 +13,7 @@ export type InventoryCondition =
 export type InventoryMovementType =
   | "purchase"
   | "sale"
+  | "amazon_sale_reversal"
   | "amazon_customer_return"
   | "retailer_return"
   | "retailer_return_rejected"
@@ -119,10 +120,45 @@ export type InventoryOverview = {
     customerReturnUnits: number;
     retailerReturnUnits: number;
     pendingReturns: number;
+    unmatchedAmazonOrderLines: number;
+    insufficientAmazonOrderLines: number;
+    lastAmazonSalesSyncAt?: string;
   };
   products: InventoryProduct[];
   recentActivity: InventoryActivity[];
   returns: InventoryReturnCase[];
+};
+
+export type AmazonInventorySalesLine = {
+  orderId: string;
+  orderItemId: string;
+  sellerSku?: string;
+  asin?: string;
+  title?: string;
+  conditionType?: string;
+  quantityOrdered: number;
+  quantityFulfilled: number;
+  fulfillmentStatus?: string;
+  fulfilledBy?: string;
+  createdAt?: string;
+  lastUpdatedAt?: string;
+};
+
+export type AmazonSalesSyncState = {
+  connectionId: string;
+  lastSyncedAt?: string;
+  hasMore: boolean;
+  lastError?: string;
+};
+
+export type AmazonSalesImportResult = {
+  processedLines: number;
+  appliedLines: number;
+  appliedUnits: number;
+  reversedUnits: number;
+  unmatchedLines: number;
+  insufficientLines: number;
+  notFulfilledLines: number;
 };
 
 export type RecordInventorySaleInput = {
@@ -198,6 +234,12 @@ export class InventoryExtractionNotFoundError extends Error {
   }
 }
 
+export class AmazonSalesSyncInProgressError extends Error {
+  constructor() {
+    super("Ya hay una sincronizacion de ventas de Amazon en curso.");
+  }
+}
+
 type ProductRow = {
   id: string;
   sku: string | null;
@@ -269,6 +311,53 @@ type InvoiceExtractionRow = {
   confirmed_at: Date | string | null;
   invoice_id: string | null;
 };
+
+type AmazonSaleLineRow = {
+  id: string;
+  product_id: string | null;
+  applied_quantity: string | number;
+  desired_quantity: string | number;
+  sync_status: AmazonSaleSyncStatus;
+};
+
+type AmazonSalesSyncRow = {
+  connection_id: string;
+  pagination_token: string | null;
+  window_started_at: Date | string | null;
+  window_after: Date | string | null;
+  last_synced_at: Date | string | null;
+  sync_started_at: Date | string | null;
+  last_error: string | null;
+};
+
+type AmazonSalesReconciliationRow = {
+  unmatched_lines: string | number | null;
+  insufficient_lines: string | number | null;
+  last_synced_at: Date | string | null;
+};
+
+type InventoryLotAvailabilityRow = {
+  id: string;
+  condition: InventoryCondition;
+  available_quantity: string | number | null;
+};
+
+type InventorySourceAllocationRow = {
+  lot_id: string | null;
+  condition: InventoryCondition;
+  applied_quantity: string | number | null;
+};
+
+type InventoryProductMatchRow = {
+  id: string;
+  title: string;
+};
+
+type AmazonSaleSyncStatus =
+  | "applied"
+  | "unmatched_product"
+  | "insufficient_stock"
+  | "not_fulfilled";
 
 let pool: Pool | undefined;
 let schemaPromise: Promise<void> | undefined;
@@ -363,6 +452,69 @@ export async function initializeInventoryStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_movements_tenant_product_idx
       ON scanneraz_inventory_movements (tenant_id, product_id, occurred_at DESC);
+
+      ALTER TABLE scanneraz_inventory_movements
+        ADD COLUMN IF NOT EXISTS source_type TEXT;
+
+      ALTER TABLE scanneraz_inventory_movements
+        ADD COLUMN IF NOT EXISTS source_id TEXT;
+
+      -- The original schema predates automatic Amazon sale reversals. Keep
+      -- every inventory correction append-only so the ledger remains auditable.
+      ALTER TABLE scanneraz_inventory_movements
+        DROP CONSTRAINT IF EXISTS scanneraz_inventory_movements_movement_type_check;
+
+      ALTER TABLE scanneraz_inventory_movements
+        ADD CONSTRAINT scanneraz_inventory_movements_movement_type_check
+        CHECK (movement_type IN (
+          'purchase', 'sale', 'amazon_sale_reversal', 'amazon_customer_return',
+          'retailer_return', 'retailer_return_rejected', 'adjustment'
+        ));
+
+      CREATE INDEX IF NOT EXISTS scanneraz_inventory_movements_source_idx
+      ON scanneraz_inventory_movements (tenant_id, source_type, source_id)
+      WHERE source_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS scanneraz_inventory_amazon_order_lines (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        connection_id TEXT NOT NULL,
+        amazon_order_id TEXT NOT NULL,
+        amazon_order_item_id TEXT NOT NULL,
+        product_id TEXT REFERENCES scanneraz_inventory_products(id) ON DELETE SET NULL,
+        seller_sku TEXT,
+        asin TEXT,
+        title TEXT,
+        condition TEXT NOT NULL CHECK (condition IN ('new', 'used_like_new', 'used_good', 'used_acceptable', 'unsellable')),
+        quantity_ordered INTEGER NOT NULL CHECK (quantity_ordered > 0),
+        desired_quantity INTEGER NOT NULL CHECK (desired_quantity >= 0),
+        applied_quantity INTEGER NOT NULL DEFAULT 0 CHECK (applied_quantity >= 0),
+        fulfillment_status TEXT,
+        fulfilled_by TEXT,
+        order_created_at TIMESTAMPTZ,
+        order_last_updated_at TIMESTAMPTZ,
+        sync_status TEXT NOT NULL CHECK (sync_status IN ('applied', 'unmatched_product', 'insufficient_stock', 'not_fulfilled')),
+        last_error TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (tenant_id, connection_id, amazon_order_id, amazon_order_item_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_inventory_amazon_order_lines_tenant_status_idx
+      ON scanneraz_inventory_amazon_order_lines (tenant_id, sync_status, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS scanneraz_inventory_amazon_sale_syncs (
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        connection_id TEXT NOT NULL,
+        pagination_token TEXT,
+        window_started_at TIMESTAMPTZ,
+        window_after TIMESTAMPTZ,
+        last_synced_at TIMESTAMPTZ,
+        sync_started_at TIMESTAMPTZ,
+        last_error TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tenant_id, connection_id)
+      );
 
       CREATE TABLE IF NOT EXISTS scanneraz_inventory_returns (
         id TEXT PRIMARY KEY,
@@ -849,10 +1001,594 @@ export async function resolveInventoryReturn(tenantId: string, input: ResolveInv
   }
 }
 
+export type AmazonSalesSyncWork = {
+  connectionId: string;
+  paginationToken?: string;
+  lastUpdatedAfter: string;
+  startedAt: string;
+};
+
+/**
+ * Claim a single tenant connection for an Amazon sales sync. A continuing page
+ * uses Amazon's short-lived pagination token; a fresh run overlaps the prior
+ * high-water mark by five minutes so late status changes are re-read safely.
+ */
+export async function beginAmazonSalesSync(
+  tenantId: string,
+  connectionId: string,
+  initialLastUpdatedAfter: string
+): Promise<AmazonSalesSyncWork> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const client = await inventoryPool.connect();
+  const now = new Date();
+  const requestedAfter = parseOccurredAt(initialLastUpdatedAfter);
+
+  try {
+    await client.query("BEGIN");
+    // Ensure the row exists before locking it. This closes the race where two
+    // first-time sync requests both observed an absent state row.
+    await client.query(
+      `
+        INSERT INTO scanneraz_inventory_amazon_sale_syncs (tenant_id, connection_id, updated_at)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (tenant_id, connection_id) DO NOTHING
+      `,
+      [tenantId, connectionId, now]
+    );
+    const currentResult = await client.query<AmazonSalesSyncRow>(
+      `
+        SELECT connection_id, pagination_token, window_started_at, window_after, last_synced_at, sync_started_at, last_error
+        FROM scanneraz_inventory_amazon_sale_syncs
+        WHERE tenant_id = $1 AND connection_id = $2
+        FOR UPDATE
+      `,
+      [tenantId, connectionId]
+    );
+    const current = currentResult.rows[0];
+    const activeAt = current?.sync_started_at;
+
+    if (activeAt && new Date(activeAt).getTime() > now.getTime() - 10 * 60 * 1000) {
+      throw new AmazonSalesSyncInProgressError();
+    }
+
+    const pendingToken = current?.pagination_token ?? undefined;
+    const pendingStartedAt = current?.window_started_at ? new Date(current.window_started_at) : undefined;
+    const pendingAfter = current?.window_after ? new Date(current.window_after) : undefined;
+    const canContinue = Boolean(
+      pendingToken &&
+      pendingStartedAt &&
+      pendingAfter &&
+      pendingStartedAt.getTime() > now.getTime() - 23 * 60 * 60 * 1000
+    );
+    const priorSyncedAt = current?.last_synced_at ? new Date(current.last_synced_at) : undefined;
+    const lastUpdatedAfter = canContinue
+      ? pendingAfter!
+      : new Date(Math.max(
+        requestedAfter.getTime(),
+        (priorSyncedAt ? priorSyncedAt.getTime() - 5 * 60 * 1000 : requestedAfter.getTime())
+      ));
+    const startedAt = canContinue ? pendingStartedAt! : now;
+
+    await client.query(
+      `
+        INSERT INTO scanneraz_inventory_amazon_sale_syncs (
+          tenant_id, connection_id, pagination_token, window_started_at, window_after, sync_started_at, last_error, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, NULL, $6)
+        ON CONFLICT (tenant_id, connection_id) DO UPDATE SET
+          pagination_token = EXCLUDED.pagination_token,
+          window_started_at = EXCLUDED.window_started_at,
+          window_after = EXCLUDED.window_after,
+          sync_started_at = EXCLUDED.sync_started_at,
+          last_error = NULL,
+          updated_at = EXCLUDED.updated_at
+      `,
+      [
+        tenantId,
+        connectionId,
+        canContinue ? pendingToken ?? null : null,
+        startedAt,
+        lastUpdatedAfter,
+        now
+      ]
+    );
+    await client.query("COMMIT");
+
+    return {
+      connectionId,
+      paginationToken: canContinue ? pendingToken : undefined,
+      lastUpdatedAfter: lastUpdatedAfter.toISOString(),
+      startedAt: startedAt.toISOString()
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function completeAmazonSalesSync(
+  tenantId: string,
+  work: AmazonSalesSyncWork,
+  nextPageToken?: string
+) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const completed = !nextPageToken;
+  const now = new Date();
+
+  await inventoryPool.query(
+    `
+      UPDATE scanneraz_inventory_amazon_sale_syncs
+      SET
+        pagination_token = $3,
+        last_synced_at = CASE WHEN $4 THEN $5 ELSE last_synced_at END,
+        window_started_at = CASE WHEN $4 THEN NULL ELSE window_started_at END,
+        window_after = CASE WHEN $4 THEN NULL ELSE window_after END,
+        sync_started_at = NULL,
+        last_error = NULL,
+        updated_at = $6
+      WHERE tenant_id = $1 AND connection_id = $2
+    `,
+    [tenantId, work.connectionId, nextPageToken ?? null, completed, work.startedAt, now]
+  );
+
+  return {
+    connectionId: work.connectionId,
+    lastSyncedAt: completed ? work.startedAt : undefined,
+    hasMore: !completed
+  } satisfies AmazonSalesSyncState;
+}
+
+export async function failAmazonSalesSync(tenantId: string, connectionId: string) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  await inventoryPool.query(
+    `
+      UPDATE scanneraz_inventory_amazon_sale_syncs
+      SET sync_started_at = NULL, last_error = 'La sincronizacion de Amazon no termino. Intenta de nuevo.', updated_at = $3
+      WHERE tenant_id = $1 AND connection_id = $2
+    `,
+    [tenantId, connectionId, new Date()]
+  );
+}
+
+export async function getAmazonSalesSyncState(
+  tenantId: string,
+  connectionId: string
+): Promise<AmazonSalesSyncState> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<AmazonSalesSyncRow>(
+    `
+      SELECT connection_id, pagination_token, window_started_at, window_after, last_synced_at, last_error
+      FROM scanneraz_inventory_amazon_sale_syncs
+      WHERE tenant_id = $1 AND connection_id = $2
+      LIMIT 1
+    `,
+    [tenantId, connectionId]
+  );
+  const row = result.rows[0];
+
+  return {
+    connectionId,
+    lastSyncedAt: row?.last_synced_at ? new Date(row.last_synced_at).toISOString() : undefined,
+    hasMore: Boolean(row?.pagination_token),
+    lastError: row?.last_error ?? undefined
+  };
+}
+
+/**
+ * Reconcile an already-normalized Orders API page against invoice-backed stock.
+ * Only operational seller data is persisted. An unmatched SKU/ASIN or a stock
+ * shortfall is retained as a reconciliation item rather than generating a
+ * hidden negative balance.
+ */
+export async function importAmazonSalesLines(
+  tenantId: string,
+  connectionId: string,
+  lines: AmazonInventorySalesLine[]
+): Promise<AmazonSalesImportResult> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const client = await inventoryPool.connect();
+  const result: AmazonSalesImportResult = {
+    processedLines: 0,
+    appliedLines: 0,
+    appliedUnits: 0,
+    reversedUnits: 0,
+    unmatchedLines: 0,
+    insufficientLines: 0,
+    notFulfilledLines: 0
+  };
+
+  try {
+    await client.query("BEGIN");
+
+    for (const line of lines) {
+      const outcome = await reconcileAmazonSalesLine(client, tenantId, connectionId, line);
+      result.processedLines += 1;
+      result.appliedUnits += outcome.appliedUnits;
+      result.reversedUnits += outcome.reversedUnits;
+
+      if (outcome.status === "applied") {
+        result.appliedLines += 1;
+      } else if (outcome.status === "unmatched_product") {
+        result.unmatchedLines += 1;
+      } else if (outcome.status === "insufficient_stock") {
+        result.insufficientLines += 1;
+      } else {
+        result.notFulfilledLines += 1;
+      }
+    }
+
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function reconcileAmazonSalesLine(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  connectionId: string,
+  rawLine: AmazonInventorySalesLine
+) {
+  const line = normalizeAmazonSalesLine(rawLine);
+  const now = new Date();
+  const occurredAt = new Date(line.lastUpdatedAt ?? line.createdAt ?? now);
+  const source = await upsertAmazonSalesLine(client, tenantId, connectionId, line, now);
+  const desiredQuantity = line.quantityFulfilled;
+  const matchedProduct = desiredQuantity > 0
+    ? await findInventoryProductForAmazonLine(client, tenantId, line)
+    : undefined;
+  let appliedQuantity = numberValue(source.applied_quantity);
+  let reversedUnits = 0;
+
+  // A SKU may have been corrected in Seller Central since a prior import. Undo
+  // its old allocation before applying the line to a different inventory item.
+  if (source.product_id && source.product_id !== matchedProduct?.id && appliedQuantity > 0) {
+    reversedUnits += await reverseAmazonSalesAllocations(client, {
+      tenantId,
+      productId: source.product_id,
+      sourceId: source.id,
+      quantity: appliedQuantity,
+      reference: line.orderId,
+      occurredAt,
+      createdAt: now
+    });
+    appliedQuantity = 0;
+  }
+
+  if (desiredQuantity === 0) {
+    if (source.product_id && source.product_id === matchedProduct?.id && appliedQuantity > 0) {
+      reversedUnits += await reverseAmazonSalesAllocations(client, {
+        tenantId,
+        productId: source.product_id,
+        sourceId: source.id,
+        quantity: appliedQuantity,
+        reference: line.orderId,
+        occurredAt: line.lastUpdatedAt ?? line.createdAt ?? now,
+        createdAt: now
+      });
+      appliedQuantity = 0;
+    }
+
+    await updateAmazonSalesLine(client, {
+      id: source.id,
+      tenantId,
+      productId: matchedProduct?.id,
+      appliedQuantity,
+      status: "not_fulfilled"
+    });
+
+    return { status: "not_fulfilled" as const, appliedUnits: 0, reversedUnits };
+  }
+
+  if (!matchedProduct) {
+    await updateAmazonSalesLine(client, {
+      id: source.id,
+      tenantId,
+      productId: undefined,
+      appliedQuantity: 0,
+      status: "unmatched_product",
+      lastError: "No existe una factura con SKU o ASIN coincidente para esta venta de Amazon."
+    });
+
+    return { status: "unmatched_product" as const, appliedUnits: 0, reversedUnits };
+  }
+
+  if (source.product_id === matchedProduct.id && appliedQuantity > desiredQuantity) {
+    const quantityToReverse = appliedQuantity - desiredQuantity;
+    const reversed = await reverseAmazonSalesAllocations(client, {
+      tenantId,
+      productId: matchedProduct.id,
+      sourceId: source.id,
+      quantity: quantityToReverse,
+      reference: line.orderId,
+      occurredAt: line.lastUpdatedAt ?? line.createdAt ?? now,
+      createdAt: now
+    });
+    reversedUnits += reversed;
+    appliedQuantity -= reversed;
+  }
+
+  const quantityToApply = Math.max(0, desiredQuantity - appliedQuantity);
+  const availableQuantity = quantityToApply > 0
+    ? await availableInventoryQuantity(client, tenantId, matchedProduct.id)
+    : 0;
+  const allocationQuantity = Math.min(quantityToApply, Math.max(0, availableQuantity));
+
+  if (allocationQuantity > 0) {
+    await allocateOutboundMovements(client, {
+      tenantId,
+      productId: matchedProduct.id,
+      movementType: "sale",
+      quantity: allocationQuantity,
+      condition: line.condition,
+      channel: line.fulfilledBy === "AMAZON" ? "Amazon FBA" : "Amazon FBM",
+      reference: line.orderId,
+      notes: "Sincronizado desde Amazon Orders API",
+      sourceType: "amazon_order_item",
+      sourceId: source.id,
+      occurredAt,
+      createdAt: now
+    });
+    appliedQuantity += allocationQuantity;
+  }
+
+  const status: AmazonSaleSyncStatus = appliedQuantity >= desiredQuantity
+    ? "applied"
+    : "insufficient_stock";
+  await updateAmazonSalesLine(client, {
+    id: source.id,
+    tenantId,
+    productId: matchedProduct.id,
+    appliedQuantity,
+    status,
+    lastError: status === "insufficient_stock"
+      ? "La factura registrada no cubre todas las unidades vendidas."
+      : undefined
+  });
+
+  return { status, appliedUnits: allocationQuantity, reversedUnits };
+}
+
+function normalizeAmazonSalesLine(input: AmazonInventorySalesLine) {
+  const orderId = normalizeRequiredText(input.orderId, "amazon order id").slice(0, 200);
+  const orderItemId = normalizeRequiredText(input.orderItemId, "amazon order item id").slice(0, 200);
+  const quantityOrdered = positiveInteger(Math.floor(input.quantityOrdered), "quantityOrdered");
+  const quantityFulfilled = Math.min(
+    quantityOrdered,
+    Math.max(0, Number.isFinite(input.quantityFulfilled) ? Math.floor(input.quantityFulfilled) : 0)
+  );
+  const createdAt = safeAmazonDate(input.createdAt);
+  const lastUpdatedAt = safeAmazonDate(input.lastUpdatedAt);
+
+  return {
+    orderId,
+    orderItemId,
+    sellerSku: normalizeCode(input.sellerSku)?.slice(0, 200),
+    asin: normalizeCode(input.asin)?.slice(0, 40),
+    title: normalizeOptionalText(input.title)?.slice(0, 500),
+    condition: inventoryConditionFromAmazon(input.conditionType),
+    quantityOrdered,
+    quantityFulfilled,
+    fulfillmentStatus: normalizeOptionalText(input.fulfillmentStatus)?.toUpperCase().slice(0, 80),
+    fulfilledBy: normalizeOptionalText(input.fulfilledBy)?.toUpperCase().slice(0, 40),
+    createdAt,
+    lastUpdatedAt
+  };
+}
+
+async function upsertAmazonSalesLine(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  connectionId: string,
+  line: ReturnType<typeof normalizeAmazonSalesLine>,
+  now: Date
+) {
+  const result = await client.query<AmazonSaleLineRow>(
+    `
+      INSERT INTO scanneraz_inventory_amazon_order_lines (
+        id, tenant_id, connection_id, amazon_order_id, amazon_order_item_id, seller_sku, asin, title,
+        condition, quantity_ordered, desired_quantity, fulfillment_status, fulfilled_by,
+        order_created_at, order_last_updated_at, sync_status, created_at, updated_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17
+      )
+      ON CONFLICT (tenant_id, connection_id, amazon_order_id, amazon_order_item_id) DO UPDATE SET
+        seller_sku = EXCLUDED.seller_sku,
+        asin = EXCLUDED.asin,
+        title = EXCLUDED.title,
+        condition = EXCLUDED.condition,
+        quantity_ordered = EXCLUDED.quantity_ordered,
+        desired_quantity = EXCLUDED.desired_quantity,
+        fulfillment_status = EXCLUDED.fulfillment_status,
+        fulfilled_by = EXCLUDED.fulfilled_by,
+        order_created_at = EXCLUDED.order_created_at,
+        order_last_updated_at = EXCLUDED.order_last_updated_at,
+        updated_at = EXCLUDED.updated_at
+      RETURNING id, product_id, applied_quantity, desired_quantity, sync_status
+    `,
+    [
+      crypto.randomUUID(),
+      tenantId,
+      connectionId,
+      line.orderId,
+      line.orderItemId,
+      line.sellerSku ?? null,
+      line.asin ?? null,
+      line.title ?? null,
+      line.condition,
+      line.quantityOrdered,
+      line.quantityFulfilled,
+      line.fulfillmentStatus ?? null,
+      line.fulfilledBy ?? null,
+      line.createdAt ?? null,
+      line.lastUpdatedAt ?? null,
+      line.quantityFulfilled === 0 ? "not_fulfilled" : "unmatched_product",
+      now
+    ]
+  );
+
+  return result.rows[0]!;
+}
+
+async function updateAmazonSalesLine(
+  client: Pick<PoolClient, "query">,
+  input: {
+    id: string;
+    tenantId: string;
+    productId?: string;
+    appliedQuantity: number;
+    status: AmazonSaleSyncStatus;
+    lastError?: string;
+  }
+) {
+  await client.query(
+    `
+      UPDATE scanneraz_inventory_amazon_order_lines
+      SET product_id = $3, applied_quantity = $4, sync_status = $5, last_error = $6, updated_at = $7
+      WHERE id = $1 AND tenant_id = $2
+    `,
+    [
+      input.id,
+      input.tenantId,
+      input.productId ?? null,
+      input.appliedQuantity,
+      input.status,
+      input.lastError ?? null,
+      new Date()
+    ]
+  );
+}
+
+async function findInventoryProductForAmazonLine(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  line: ReturnType<typeof normalizeAmazonSalesLine>
+) {
+  if (!line.sellerSku && !line.asin) {
+    return undefined;
+  }
+
+  const result = await client.query<InventoryProductMatchRow>(
+    `
+      SELECT id, title
+      FROM scanneraz_inventory_products
+      WHERE tenant_id = $1 AND (
+        ($2::text IS NOT NULL AND UPPER(REPLACE(COALESCE(sku, ''), ' ', '')) = $2)
+        OR ($3::text IS NOT NULL AND UPPER(REPLACE(COALESCE(asin, ''), ' ', '')) = $3)
+      )
+      ORDER BY
+        CASE WHEN $2::text IS NOT NULL AND UPPER(REPLACE(COALESCE(sku, ''), ' ', '')) = $2 THEN 0 ELSE 1 END,
+        CASE WHEN $3::text IS NOT NULL AND UPPER(REPLACE(COALESCE(asin, ''), ' ', '')) = $3 THEN 0 ELSE 1 END,
+        updated_at DESC
+      LIMIT 1
+      FOR UPDATE
+    `,
+    [tenantId, line.sellerSku ?? null, line.asin ?? null]
+  );
+
+  return result.rows[0];
+}
+
+async function reverseAmazonSalesAllocations(
+  client: Pick<PoolClient, "query">,
+  input: {
+    tenantId: string;
+    productId: string;
+    sourceId: string;
+    quantity: number;
+    reference: string;
+    occurredAt: string | Date;
+    createdAt: Date;
+  }
+) {
+  const result = await client.query<InventorySourceAllocationRow>(
+    `
+      SELECT lot_id, MIN(condition) AS condition, -SUM(quantity_delta) AS applied_quantity
+      FROM scanneraz_inventory_movements
+      WHERE tenant_id = $1 AND product_id = $2 AND source_type = 'amazon_order_item' AND source_id = $3
+      GROUP BY lot_id
+      HAVING SUM(quantity_delta) < 0
+      ORDER BY lot_id NULLS LAST
+    `,
+    [input.tenantId, input.productId, input.sourceId]
+  );
+  let remaining = input.quantity;
+  let reversed = 0;
+
+  for (const allocation of result.rows) {
+    const quantity = Math.min(remaining, numberValue(allocation.applied_quantity));
+
+    if (quantity <= 0) {
+      continue;
+    }
+
+    await insertMovement(client, {
+      tenantId: input.tenantId,
+      productId: input.productId,
+      lotId: allocation.lot_id ?? undefined,
+      movementType: "amazon_sale_reversal",
+      quantityDelta: quantity,
+      condition: allocation.condition,
+      channel: "Amazon",
+      reference: input.reference,
+      notes: "Correccion de estado desde Amazon Orders API",
+      sourceType: "amazon_order_item",
+      sourceId: input.sourceId,
+      occurredAt: input.occurredAt instanceof Date ? input.occurredAt : new Date(input.occurredAt),
+      createdAt: input.createdAt
+    });
+    remaining -= quantity;
+    reversed += quantity;
+  }
+
+  if (remaining > 0) {
+    throw new Error("Amazon sale ledger allocation is inconsistent.");
+  }
+
+  return reversed;
+}
+
+function inventoryConditionFromAmazon(value?: string): InventoryCondition {
+  const condition = value?.trim().toUpperCase() ?? "";
+
+  if (condition.includes("ACCEPTABLE")) {
+    return "used_acceptable";
+  }
+
+  if (condition.includes("GOOD")) {
+    return "used_good";
+  }
+
+  if (condition.includes("USED") || condition.includes("LIKE_NEW") || condition.includes("REFURBISHED")) {
+    return "used_like_new";
+  }
+
+  return "new";
+}
+
+function safeAmazonDate(value?: string) {
+  if (!value) {
+    return undefined;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
 export async function getInventoryOverview(tenantId: string): Promise<InventoryOverview> {
   const inventoryPool = requirePool();
   await initializeInventoryStore();
-  const [productResult, activityResult, returnResult] = await Promise.all([
+  const [productResult, activityResult, returnResult, reconciliationResult] = await Promise.all([
     inventoryPool.query<ProductRow>(
       `
         WITH movement_summary AS (
@@ -860,7 +1596,7 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
             product_id,
             SUM(quantity_delta) AS available_quantity,
             SUM(CASE WHEN movement_type = 'purchase' THEN quantity_delta ELSE 0 END) AS received_quantity,
-            SUM(CASE WHEN movement_type = 'sale' THEN -quantity_delta ELSE 0 END) AS sold_quantity,
+            SUM(CASE WHEN movement_type IN ('sale', 'amazon_sale_reversal') THEN -quantity_delta ELSE 0 END) AS sold_quantity,
             SUM(CASE WHEN movement_type = 'amazon_customer_return' THEN quantity_delta ELSE 0 END) AS customer_return_quantity,
             SUM(CASE WHEN movement_type = 'retailer_return' THEN -quantity_delta ELSE 0 END) AS retailer_return_quantity,
             MAX(occurred_at) AS last_activity_at
@@ -943,6 +1679,19 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
         LIMIT 40
       `,
       [tenantId]
+    ),
+    inventoryPool.query<AmazonSalesReconciliationRow>(
+      `
+        SELECT
+          COUNT(lines.id) FILTER (WHERE lines.sync_status = 'unmatched_product') AS unmatched_lines,
+          COUNT(lines.id) FILTER (WHERE lines.sync_status = 'insufficient_stock') AS insufficient_lines,
+          MAX(syncs.last_synced_at) AS last_synced_at
+        FROM scanneraz_inventory_amazon_sale_syncs AS syncs
+        LEFT JOIN scanneraz_inventory_amazon_order_lines AS lines
+          ON lines.tenant_id = syncs.tenant_id AND lines.connection_id = syncs.connection_id
+        WHERE syncs.tenant_id = $1
+      `,
+      [tenantId]
     )
   ]);
 
@@ -968,6 +1717,7 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
     } satisfies InventoryProduct;
   });
   const returns = returnResult.rows.map(toInventoryReturnCase);
+  const reconciliation = reconciliationResult.rows[0];
 
   return {
     summary: {
@@ -979,7 +1729,12 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
       retailerReturnUnits: products.reduce((total, product) => total + product.retailerReturnQuantity, 0),
       pendingReturns: returns.filter((returnCase) =>
         returnCase.status === "received_pending" || returnCase.status === "sent"
-      ).length
+      ).length,
+      unmatchedAmazonOrderLines: numberValue(reconciliation?.unmatched_lines),
+      insufficientAmazonOrderLines: numberValue(reconciliation?.insufficient_lines),
+      lastAmazonSalesSyncAt: reconciliation?.last_synced_at
+        ? new Date(reconciliation.last_synced_at).toISOString()
+        : undefined
     },
     products,
     recentActivity: activityResult.rows.map(toInventoryActivity),
@@ -1017,6 +1772,8 @@ async function recordOutboundMovement(
     channel?: string;
     reference?: string;
     notes?: string;
+    sourceType?: string;
+    sourceId?: string;
     occurredAt: Date;
   }
 ) {
@@ -1029,20 +1786,22 @@ async function recordOutboundMovement(
   try {
     await client.query("BEGIN");
     await requireAvailableQuantity(client, tenantId, input.productId, quantity);
-    const activity = await insertMovement(client, {
+    const activities = await allocateOutboundMovements(client, {
       tenantId,
       productId: input.productId,
       movementType: input.movementType,
-      quantityDelta: -quantity,
+      quantity,
       condition: input.condition,
       channel: input.channel,
       reference: input.reference,
       notes: input.notes,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
       occurredAt: input.occurredAt,
       createdAt
     });
     await client.query("COMMIT");
-    return activity;
+    return activities[0] ?? { id: crypto.randomUUID() };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -1132,6 +1891,134 @@ async function requireAvailableQuantity(
   }
 }
 
+async function availableInventoryQuantity(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  productId: string
+) {
+  const result = await client.query<{ available_quantity: string | number | null }>(
+    `
+      SELECT COALESCE(SUM(quantity_delta), 0) AS available_quantity
+      FROM scanneraz_inventory_movements
+      WHERE tenant_id = $1 AND product_id = $2
+    `,
+    [tenantId, productId]
+  );
+
+  return numberValue(result.rows[0]?.available_quantity);
+}
+
+/**
+ * Split every outbound movement across purchase lots, oldest first. Older
+ * manual movements did not have a lot ID, so their net quantity is consumed
+ * from the same FIFO sequence before allocating a new sale. This keeps total
+ * stock exact while progressively improving lot-level traceability.
+ */
+async function allocateOutboundMovements(
+  client: Pick<PoolClient, "query">,
+  input: {
+    tenantId: string;
+    productId: string;
+    movementType: "sale";
+    quantity: number;
+    condition: InventoryCondition;
+    channel?: string;
+    reference?: string;
+    notes?: string;
+    sourceType?: string;
+    sourceId?: string;
+    occurredAt: Date;
+    createdAt: Date;
+  }
+) {
+  const [lotResult, unallocatedResult] = await Promise.all([
+    client.query<InventoryLotAvailabilityRow>(
+      `
+        SELECT
+          lots.id,
+          lots.condition,
+          COALESCE(SUM(movements.quantity_delta), 0) AS available_quantity
+        FROM scanneraz_inventory_lots AS lots
+        LEFT JOIN scanneraz_inventory_movements AS movements ON movements.lot_id = lots.id
+        WHERE lots.tenant_id = $1 AND lots.product_id = $2
+        GROUP BY lots.id, lots.condition, lots.received_at, lots.created_at
+        ORDER BY lots.received_at ASC, lots.created_at ASC, lots.id ASC
+      `,
+      [input.tenantId, input.productId]
+    ),
+    client.query<{ unallocated_quantity: string | number | null }>(
+      `
+        SELECT COALESCE(SUM(quantity_delta), 0) AS unallocated_quantity
+        FROM scanneraz_inventory_movements
+        WHERE tenant_id = $1 AND product_id = $2 AND lot_id IS NULL
+      `,
+      [input.tenantId, input.productId]
+    )
+  ]);
+  let remaining = input.quantity;
+  let legacyUnallocatedOutbound = Math.max(0, -numberValue(unallocatedResult.rows[0]?.unallocated_quantity));
+  const activities: Array<{ id: string }> = [];
+
+  for (const lot of lotResult.rows) {
+    const available = Math.max(0, numberValue(lot.available_quantity));
+    const consumedByLegacyMovement = Math.min(available, legacyUnallocatedOutbound);
+    legacyUnallocatedOutbound -= consumedByLegacyMovement;
+    const allocatable = available - consumedByLegacyMovement;
+    const allocation = Math.min(remaining, allocatable);
+
+    if (allocation <= 0) {
+      continue;
+    }
+
+    activities.push(await insertMovement(client, {
+      tenantId: input.tenantId,
+      productId: input.productId,
+      lotId: lot.id,
+      movementType: input.movementType,
+      quantityDelta: -allocation,
+      condition: input.condition,
+      channel: input.channel,
+      reference: input.reference,
+      notes: input.notes,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      occurredAt: input.occurredAt,
+      createdAt: input.createdAt
+    }));
+    remaining -= allocation;
+  }
+
+  // Positive unallocated movements can come from a return that was put back
+  // into stock before a source lot was known. Preserve the ledger rather than
+  // attaching that unit to an arbitrary invoice lot.
+  const unallocatedInventory = Math.max(0, numberValue(unallocatedResult.rows[0]?.unallocated_quantity));
+  const unallocatedAllocation = Math.min(remaining, unallocatedInventory);
+
+  if (unallocatedAllocation > 0) {
+    activities.push(await insertMovement(client, {
+      tenantId: input.tenantId,
+      productId: input.productId,
+      movementType: input.movementType,
+      quantityDelta: -unallocatedAllocation,
+      condition: input.condition,
+      channel: input.channel,
+      reference: input.reference,
+      notes: input.notes,
+      sourceType: input.sourceType,
+      sourceId: input.sourceId,
+      occurredAt: input.occurredAt,
+      createdAt: input.createdAt
+    }));
+    remaining -= unallocatedAllocation;
+  }
+
+  if (remaining > 0) {
+    throw new InsufficientInventoryError();
+  }
+
+  return activities;
+}
+
 async function getOpenReturnCase(
   client: Pick<PoolClient, "query">,
   tenantId: string,
@@ -1162,6 +2049,8 @@ async function insertMovement(
     channel?: string;
     reference?: string;
     notes?: string;
+    sourceType?: string;
+    sourceId?: string;
     occurredAt: Date;
     createdAt: Date;
   }
@@ -1171,8 +2060,8 @@ async function insertMovement(
     `
       INSERT INTO scanneraz_inventory_movements (
         id, tenant_id, product_id, lot_id, movement_type, quantity_delta, condition, channel, reference, notes,
-        occurred_at, created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        source_type, source_id, occurred_at, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
     `,
     [
       id,
@@ -1185,6 +2074,8 @@ async function insertMovement(
       input.channel ?? null,
       input.reference ?? null,
       input.notes ?? null,
+      input.sourceType ?? null,
+      input.sourceId ?? null,
       input.occurredAt,
       input.createdAt
     ]

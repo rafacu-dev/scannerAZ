@@ -87,6 +87,52 @@ export type AmazonPricingListing = {
   currency?: string;
 };
 
+/**
+ * Operational order data needed to reconcile a seller's own inventory. This
+ * deliberately excludes buyer, address, payment, tax, package, and tracking
+ * fields. It is normalized from Orders API v2026-01-01 responses.
+ */
+export type AmazonFulfilledOrderLine = {
+  orderId: string;
+  orderItemId: string;
+  sellerSku?: string;
+  asin?: string;
+  title?: string;
+  conditionType?: string;
+  quantityOrdered: number;
+  quantityFulfilled: number;
+  fulfillmentStatus?: string;
+  fulfilledBy?: string;
+  createdAt?: string;
+  lastUpdatedAt?: string;
+};
+
+export type AmazonOrderSearchPage = {
+  lines: AmazonFulfilledOrderLine[];
+  nextPageToken?: string;
+};
+
+type AmazonOrdersSearchResponse = {
+  orders?: unknown[];
+  pagination?: {
+    nextToken?: string;
+  };
+};
+
+export class AmazonOrdersRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number, _body: unknown) {
+    super(
+      status === 401 || status === 403
+        ? `Amazon Orders access failed: ${status}. The seller must authorize this app and it needs an Orders-capable role such as Inventory and Order Tracking.`
+        : `Amazon Orders request failed: ${status}.`
+    );
+    this.name = "AmazonOrdersRequestError";
+    this.status = status;
+  }
+}
+
 export type PreparedListingPriceUpdate = {
   sku: string;
   asin?: string;
@@ -258,6 +304,117 @@ export async function searchSellerListings(input: {
   }
 
   return parsedBody as SellerListingsSearchResponse;
+}
+
+/**
+ * Searches Amazon Orders API v2026-01-01. The request intentionally asks for
+ * FULFILLMENT only: no buyer, recipient, payment, tax, promotion, package, or
+ * tracking data is requested or returned to ScannerAz.
+ */
+export async function searchSellerOrders(input: {
+  refreshToken: string;
+  accessToken?: string;
+  marketplaceId?: string;
+  lastUpdatedAfter?: string;
+  paginationToken?: string;
+  maxResultsPerPage?: number;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL("/orders/2026-01-01/orders", endpoint);
+
+  if (input.paginationToken) {
+    url.searchParams.set("paginationToken", input.paginationToken);
+  } else {
+    if (!input.lastUpdatedAfter) {
+      throw new Error("lastUpdatedAfter is required when no Amazon Orders pagination token is supplied.");
+    }
+
+    url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+    url.searchParams.set("lastUpdatedAfter", input.lastUpdatedAfter);
+    url.searchParams.set("maxResultsPerPage", String(Math.max(1, Math.min(input.maxResultsPerPage ?? 100, 100))));
+    url.searchParams.set("includedData", "FULFILLMENT");
+  }
+
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      "user-agent": "ScannerAz/0.1.0 (Language=Node.js; Platform=backend)",
+      "x-amz-access-token": accessToken,
+      "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "")
+    }
+  });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new AmazonOrdersRequestError(response.status, parsedBody);
+  }
+
+  return parsedBody as AmazonOrdersSearchResponse;
+}
+
+/**
+ * Orders v2026-01-01 returns the order items with searchOrders, so no per-line
+ * follow-up request is necessary. Items are kept even when their fulfilled
+ * quantity is zero; a later order-state update can then reverse an earlier
+ * inventory movement safely.
+ */
+export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse): AmazonOrderSearchPage {
+  const orders = (response.orders ?? []).flatMap((rawOrder) => {
+    const order = asRecord(rawOrder);
+    const orderId = stringValue(order?.orderId);
+
+    if (!orderId) {
+      return [];
+    }
+
+    const fulfillment = asRecord(order?.fulfillment);
+    const fulfillmentStatus = stringValue(fulfillment?.fulfillmentStatus)?.toUpperCase();
+    const fulfilledBy = stringValue(fulfillment?.fulfilledBy)?.toUpperCase();
+    const createdAt = isoDateValue(order?.createdTime);
+    const lastUpdatedAt = isoDateValue(order?.lastUpdatedTime);
+
+    return recordArray(order?.orderItems).flatMap((item) => {
+      const orderItemId = stringValue(item.orderItemId);
+      const product = asRecord(item.product);
+      const itemFulfillment = asRecord(item.fulfillment);
+      const sellerSku = stringValue(product?.sellerSku);
+      const asin = stringValue(product?.asin)?.toUpperCase();
+      const title = stringValue(product?.title);
+      const conditionType = stringValue(asRecord(product?.condition)?.conditionType);
+      const quantityOrdered = nonNegativeNumericValue(item.quantityOrdered) ?? 0;
+      const explicitFulfilled = nonNegativeNumericValue(itemFulfillment?.quantityFulfilled);
+      const quantityFulfilled = explicitFulfilled ?? (
+        fulfillmentStatus === "SHIPPED" ? quantityOrdered : 0
+      );
+
+      if (!orderItemId || quantityOrdered <= 0) {
+        return [];
+      }
+
+      return [{
+        orderId,
+        orderItemId,
+        quantityOrdered,
+        quantityFulfilled: Math.min(quantityOrdered, quantityFulfilled),
+        ...(sellerSku ? { sellerSku } : {}),
+        ...(asin ? { asin } : {}),
+        ...(title ? { title } : {}),
+        ...(conditionType ? { conditionType } : {}),
+        ...(fulfillmentStatus ? { fulfillmentStatus } : {}),
+        ...(fulfilledBy ? { fulfilledBy } : {}),
+        ...(createdAt ? { createdAt } : {}),
+        ...(lastUpdatedAt ? { lastUpdatedAt } : {})
+      } satisfies AmazonFulfilledOrderLine];
+    });
+  });
+  const pagination = asRecord(response.pagination);
+
+  return {
+    lines: orders,
+    nextPageToken: stringValue(pagination?.nextToken)
+  };
 }
 
 export async function getSellerListingItem(input: {
@@ -581,6 +738,22 @@ function numericValue(value: unknown) {
   }
 
   return undefined;
+}
+
+function nonNegativeNumericValue(value: unknown) {
+  const number = numericValue(value);
+  return number !== undefined && number >= 0 ? Math.floor(number) : undefined;
+}
+
+function isoDateValue(value: unknown) {
+  const text = stringValue(value);
+
+  if (!text) {
+    return undefined;
+  }
+
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function priceFromPurchasableOffer(offer?: Record<string, unknown>) {

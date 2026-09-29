@@ -17,9 +17,15 @@ Request only the non-restricted roles required by the first product release:
 
 - `Product Listing` for catalog/listing eligibility and restrictions.
 - `Pricing` for offer and pricing analysis.
+- `Inventory and Order Tracking` to reconcile fulfilled order-line quantities
+  against invoice-backed inventory.
 
-Do not request buyer PII, order, payment, message, tax, or shipping roles
-until a specific product feature needs them and its security review is complete.
+The inventory feature uses only operational order data: Amazon order ID,
+order-item ID, seller SKU, ASIN, title, quantity, fulfillment state/channel,
+and timestamps. It does not request, store, or expose buyer PII, recipient
+addresses, payment, tax, promotion, package, tracking, messaging, or shipping
+address data. Do not request any of those datasets or roles unless a separate
+feature needs them and its security review is complete.
 
 ## Authorization model
 
@@ -58,7 +64,8 @@ Before external sellers can use ScannerAz broadly, implement:
 ## Amazon registration and release sequence
 
 1. Complete the Developer Profile as a public developer with truthful security
-   controls and the minimal roles above.
+   controls and the minimal roles above, including the inventory order-tracking
+   use case.
 2. Obtain approval for the Developer Profile and roles.
 3. Register the production application in Solution Provider Portal.
 4. Configure the public OAuth redirect URI and generate production LWA

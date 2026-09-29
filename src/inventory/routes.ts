@@ -2,7 +2,14 @@ import express from "express";
 import multer, { MulterError } from "multer";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
-import { config } from "../config.js";
+import { assertAmazonSpApiConfig, config } from "../config.js";
+import { getAmazonConnectionForTenant } from "../storage/connections.js";
+import {
+  AmazonOrdersRequestError,
+  getLwaAccessToken,
+  normalizeAmazonOrderSearch,
+  searchSellerOrders
+} from "../amazon/spapi.js";
 import {
   detectInvoiceMimeType,
   extractInvoiceDocument,
@@ -12,11 +19,17 @@ import {
   InvoiceExtractionUnavailableError
 } from "./extraction.js";
 import {
+  AmazonSalesSyncInProgressError,
+  beginAmazonSalesSync,
+  completeAmazonSalesSync,
   confirmInvoiceExtraction,
   createInventoryInvoice,
   DuplicateInventoryInvoiceError,
   findInvoiceExtractionByDocumentHash,
+  failAmazonSalesSync,
+  getAmazonSalesSyncState,
   getInventoryOverview,
+  importAmazonSalesLines,
   InsufficientInventoryError,
   InventoryExtractionNotFoundError,
   InvalidInventoryReturnResolutionError,
@@ -52,6 +65,19 @@ const invoiceExtractionRateLimit = rateLimit({
   }
 });
 
+// searchOrders has a conservative default usage plan. A tenant can continue a
+// paginated sync, but cannot turn the action into a rapid polling loop.
+const amazonSalesSyncRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 4,
+  legacyHeaders: false,
+  standardHeaders: true,
+  keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
+  handler: (_req, res) => {
+    res.status(429).json({ error: "Espera un momento antes de volver a sincronizar ventas de Amazon." });
+  }
+});
+
 const conditionSchema = z.enum([
   "new",
   "used_like_new",
@@ -62,6 +88,12 @@ const conditionSchema = z.enum([
 const optionalText = z.string().trim().max(500).optional().transform((value) => value || undefined);
 const optionalReference = z.string().trim().max(160).optional().transform((value) => value || undefined);
 const occurredAtSchema = z.string().datetime().optional();
+const amazonSalesSyncSchema = z.object({
+  // A first sync defaults to ninety days. Amazon keeps order history for a
+  // limited period, and selecting a smaller initial window avoids an expensive
+  // surprise for a new seller account.
+  from: z.string().datetime().optional()
+});
 
 const invoiceSchema = z.object({
   retailer: z.string().trim().min(1).max(100),
@@ -122,6 +154,126 @@ inventoryRouter.get("/overview", async (req, res, next) => {
   try {
     res.json(await getInventoryOverview(requireTenantId(req)));
   } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.get("/amazon-sales/:connectionId/sync-state", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "No encontramos esa conexion de Amazon." });
+      return;
+    }
+
+    res.json({ sync: await getAmazonSalesSyncState(tenantId, connectionId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.post("/amazon-sales/:connectionId/sync", amazonSalesSyncRateLimit, async (req, res, next) => {
+  const connectionId = String(req.params.connectionId ?? "").trim();
+  let tenantId: string | undefined;
+  let syncClaimed = false;
+
+  try {
+    tenantId = requireTenantId(req);
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "No encontramos esa conexion de Amazon." });
+      return;
+    }
+
+    const input = amazonSalesSyncSchema.parse(req.body ?? {});
+    const now = new Date();
+    const from = input.from ? new Date(input.from) : new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const oldestAllowed = new Date(now.getTime() - 730 * 24 * 60 * 60 * 1000);
+
+    if (Number.isNaN(from.getTime()) || from > now || from < oldestAllowed) {
+      res.status(400).json({ error: "La fecha inicial de ventas debe estar dentro de los ultimos dos anos." });
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const work = await beginAmazonSalesSync(tenantId, connectionId, from.toISOString());
+    syncClaimed = true;
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    let paginationToken = work.paginationToken;
+    let pages = 0;
+    let nextPageToken: string | undefined;
+    const totals = {
+      processedLines: 0,
+      appliedLines: 0,
+      appliedUnits: 0,
+      reversedUnits: 0,
+      unmatchedLines: 0,
+      insufficientLines: 0,
+      notFulfilledLines: 0
+    };
+
+    // Five 100-order pages stays below the documented burst allowance while
+    // giving a first sync enough room for a meaningful inventory reconciliation.
+    do {
+      const response = await searchSellerOrders({
+        refreshToken: connection.refreshToken,
+        accessToken,
+        marketplaceId: connection.marketplaceId || config.AMAZON_MARKETPLACE_ID,
+        lastUpdatedAfter: paginationToken ? undefined : work.lastUpdatedAfter,
+        paginationToken,
+        maxResultsPerPage: 100
+      });
+      const page = normalizeAmazonOrderSearch(response);
+      const imported = await importAmazonSalesLines(tenantId, connectionId, page.lines);
+
+      totals.processedLines += imported.processedLines;
+      totals.appliedLines += imported.appliedLines;
+      totals.appliedUnits += imported.appliedUnits;
+      totals.reversedUnits += imported.reversedUnits;
+      totals.unmatchedLines += imported.unmatchedLines;
+      totals.insufficientLines += imported.insufficientLines;
+      totals.notFulfilledLines += imported.notFulfilledLines;
+      pages += 1;
+      nextPageToken = page.nextPageToken;
+      paginationToken = nextPageToken;
+    } while (paginationToken && pages < 5);
+
+    const sync = await completeAmazonSalesSync(tenantId, work, nextPageToken);
+    syncClaimed = false;
+    res.json({
+      connectionId,
+      pages,
+      ...totals,
+      sync
+    });
+  } catch (error) {
+    if (syncClaimed && tenantId) {
+      await failAmazonSalesSync(tenantId, connectionId).catch(() => undefined);
+    }
+
+    if (error instanceof AmazonSalesSyncInProgressError) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+
+    if (error instanceof AmazonOrdersRequestError) {
+      res.status(error.status === 429 ? 429 : 409).json({
+        error: error.status === 429
+          ? "Amazon esta limitando la sincronizacion. Espera unos minutos e intenta de nuevo."
+          : "Amazon aun no autorizo el acceso a pedidos para esta conexion. Vuelve a autorizar la cuenta cuando el rol este habilitado."
+      });
+      return;
+    }
+
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "La fecha de sincronizacion no es valida." });
+      return;
+    }
+
     next(error);
   }
 });

@@ -4,6 +4,7 @@ import {
   getSpApiEndpoint,
   inferCatalogIdentifierType,
   normalizeCatalogSearchResponse,
+  normalizeAmazonOrderSearch,
   normalizePricingListings,
   prepareListingPriceUpdate
 } from "./spapi.js";
@@ -145,6 +146,74 @@ test("normalizes seller listings with their SKU, type, and current offer price",
       }
     ],
     nextPageToken: "next-page"
+  });
+});
+
+test("normalizes fulfillment-only order lines without buyer or recipient data", () => {
+  const result = normalizeAmazonOrderSearch({
+    orders: [{
+      orderId: "111-2222222-3333333",
+      createdTime: "2026-09-01T10:00:00Z",
+      lastUpdatedTime: "2026-09-02T12:00:00Z",
+      fulfillment: {
+        fulfillmentStatus: "PARTIALLY_SHIPPED",
+        fulfilledBy: "AMAZON"
+      },
+      // These fields deliberately prove that the normalizer does not carry PII.
+      buyer: { buyerName: "Do not retain", buyerEmail: "buyer@example.test" },
+      recipient: { deliveryAddress: { addressLine1: "Do not retain" } },
+      orderItems: [
+        {
+          orderItemId: "line-1",
+          quantityOrdered: 3,
+          product: {
+            asin: "B0GSDRQN6L",
+            sellerSku: "BEAUTIFUL-COOKER",
+            title: "Beautiful multi-cooker",
+            condition: { conditionType: "NEW" }
+          },
+          fulfillment: { quantityFulfilled: 2 }
+        },
+        {
+          orderItemId: "line-2",
+          quantityOrdered: 1,
+          product: { asin: "B0OTHER000", sellerSku: "UNSHIPPED" }
+        }
+      ]
+    }],
+    pagination: { nextToken: "next-orders-page" }
+  });
+
+  assert.deepEqual(result, {
+    lines: [
+      {
+        orderId: "111-2222222-3333333",
+        orderItemId: "line-1",
+        sellerSku: "BEAUTIFUL-COOKER",
+        asin: "B0GSDRQN6L",
+        title: "Beautiful multi-cooker",
+        conditionType: "NEW",
+        quantityOrdered: 3,
+        quantityFulfilled: 2,
+        fulfillmentStatus: "PARTIALLY_SHIPPED",
+        fulfilledBy: "AMAZON",
+        createdAt: "2026-09-01T10:00:00.000Z",
+        lastUpdatedAt: "2026-09-02T12:00:00.000Z"
+      },
+      {
+        orderId: "111-2222222-3333333",
+        orderItemId: "line-2",
+        sellerSku: "UNSHIPPED",
+        asin: "B0OTHER000",
+        quantityOrdered: 1,
+        quantityFulfilled: 0,
+        fulfillmentStatus: "PARTIALLY_SHIPPED",
+        fulfilledBy: "AMAZON",
+        createdAt: "2026-09-01T10:00:00.000Z",
+        lastUpdatedAt: "2026-09-02T12:00:00.000Z"
+      }
+    ],
+    nextPageToken: "next-orders-page"
   });
 });
 
