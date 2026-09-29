@@ -136,6 +136,6 @@ and Amazon integration are enabled.
    security answers and submit a **new** profile request; do not reopen the
    rejected case.
 5. After approval, register/configure the production app, OAuth redirect URI,
-   LWA credentials, and the two minimal SP-API roles.
+   LWA credentials, and the three minimal SP-API roles.
 6. Complete Amazon's public-app and Appstore review, then begin with a
    limited pilot before broad commercial availability.
