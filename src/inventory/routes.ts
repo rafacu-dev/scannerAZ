@@ -1,10 +1,24 @@
 import express from "express";
+import multer, { MulterError } from "multer";
+import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
+import { config } from "../config.js";
 import {
+  detectInvoiceMimeType,
+  extractInvoiceDocument,
+  invoiceDocumentSha256,
+  InvoiceExtractionDocumentError,
+  InvoiceExtractionProviderError,
+  InvoiceExtractionUnavailableError
+} from "./extraction.js";
+import {
+  confirmInvoiceExtraction,
   createInventoryInvoice,
   DuplicateInventoryInvoiceError,
+  findInvoiceExtractionByDocumentHash,
   getInventoryOverview,
   InsufficientInventoryError,
+  InventoryExtractionNotFoundError,
   InvalidInventoryReturnResolutionError,
   InventoryProductNotFoundError,
   InventoryReturnNotFoundError,
@@ -12,10 +26,31 @@ import {
   recordInventorySale,
   recordRetailerReturn,
   resolveInventoryReturn,
+  saveInvoiceExtraction,
   type InventoryCondition
 } from "./store.js";
 
 export const inventoryRouter = express.Router();
+
+const invoiceUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 1,
+    fileSize: config.INVOICE_EXTRACTION_MAX_FILE_BYTES,
+    fields: 4
+  }
+});
+
+const invoiceExtractionRateLimit = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 6,
+  legacyHeaders: false,
+  standardHeaders: true,
+  keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
+  handler: (_req, res) => {
+    res.status(429).json({ error: "Has alcanzado el limite temporal de analisis de facturas." });
+  }
+});
 
 const conditionSchema = z.enum([
   "new",
@@ -100,6 +135,61 @@ inventoryRouter.post("/invoices", async (req, res, next) => {
   }
 });
 
+inventoryRouter.post("/invoice-extractions", invoiceExtractionRateLimit, async (req, res, next) => {
+  let file: Express.Multer.File | undefined;
+
+  try {
+    const tenantId = requireTenantId(req);
+    file = await parseInvoiceUpload(req, res);
+    const documentSha256 = invoiceDocumentSha256(file.buffer);
+    const mimeType = detectInvoiceMimeType(file.buffer);
+
+    if (!mimeType) {
+      throw new InvoiceExtractionDocumentError("Usa un PDF, JPG, PNG o WEBP valido para analizar la factura.");
+    }
+
+    const existing = await findInvoiceExtractionByDocumentHash(tenantId, documentSha256);
+
+    if (existing) {
+      res.json({ extraction: existing, reused: true });
+      return;
+    }
+
+    const extracted = await extractInvoiceDocument({
+      filename: safeFilename(file.originalname),
+      mimeType,
+      buffer: file.buffer
+    });
+    const extraction = await saveInvoiceExtraction(tenantId, {
+      sourceFilename: safeFilename(file.originalname),
+      mimeType,
+      sizeBytes: file.size,
+      documentSha256: extracted.documentSha256,
+      model: extracted.model,
+      draft: extracted.draft
+    });
+    res.status(201).json({ extraction });
+  } catch (error) {
+    respondToInventoryError(error, res, next);
+  } finally {
+    // Multer is memory-only here. Do not retain an invoice in Node memory once
+    // the extraction response has been created.
+    file?.buffer.fill(0);
+  }
+});
+
+inventoryRouter.post("/invoice-extractions/:extractionId/confirm", async (req, res, next) => {
+  try {
+    const result = await confirmInvoiceExtraction(requireTenantId(req), {
+      extractionId: z.string().uuid().parse(req.params.extractionId),
+      invoice: invoiceSchema.parse(req.body)
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    respondToInventoryError(error, res, next);
+  }
+});
+
 inventoryRouter.post("/sales", async (req, res, next) => {
   try {
     const activity = await recordInventorySale(requireTenantId(req), saleSchema.parse(req.body));
@@ -157,6 +247,30 @@ function respondToInventoryError(
   res: express.Response,
   next: express.NextFunction
 ) {
+  if (error instanceof MulterError) {
+    res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({
+      error: error.code === "LIMIT_FILE_SIZE"
+        ? "La factura excede el tamano permitido."
+        : "Solo puedes adjuntar un documento de factura."
+    });
+    return;
+  }
+
+  if (error instanceof InvoiceExtractionUnavailableError) {
+    res.status(503).json({ error: error.message });
+    return;
+  }
+
+  if (error instanceof InvoiceExtractionDocumentError) {
+    res.status(422).json({ error: error.message });
+    return;
+  }
+
+  if (error instanceof InvoiceExtractionProviderError) {
+    res.status(502).json({ error: error.message });
+    return;
+  }
+
   if (error instanceof z.ZodError) {
     res.status(400).json({ error: "Los datos de inventario no son validos." });
     return;
@@ -167,7 +281,11 @@ function respondToInventoryError(
     return;
   }
 
-  if (error instanceof InventoryProductNotFoundError || error instanceof InventoryReturnNotFoundError) {
+  if (
+    error instanceof InventoryProductNotFoundError ||
+    error instanceof InventoryReturnNotFoundError ||
+    error instanceof InventoryExtractionNotFoundError
+  ) {
     res.status(404).json({ error: error.message });
     return;
   }
@@ -178,4 +296,27 @@ function respondToInventoryError(
   }
 
   next(error);
+}
+
+function parseInvoiceUpload(req: express.Request, res: express.Response) {
+  return new Promise<Express.Multer.File>((resolve, reject) => {
+    invoiceUpload.single("document")(req, res, (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      if (!req.file) {
+        reject(new InvoiceExtractionDocumentError("Adjunta un PDF, imagen o foto de la factura."));
+        return;
+      }
+
+      resolve(req.file);
+    });
+  });
+}
+
+function safeFilename(value: string) {
+  const filename = value.replace(/[\\/\u0000-\u001f]/g, " ").trim().slice(0, 255);
+  return filename || "factura";
 }

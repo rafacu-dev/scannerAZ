@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { config } from "../config.js";
+import type { ExtractedInvoiceDraft } from "./extraction.js";
 
 export type InventoryCondition =
   | "new"
@@ -44,7 +45,24 @@ export type CreateInventoryInvoiceInput = {
   currency: string;
   notes?: string;
   documentName?: string;
+  sourceExtractionId?: string;
   lines: InventoryInvoiceLineInput[];
+};
+
+export type InvoiceExtractionStatus = "pending_review" | "processing" | "confirmed";
+
+export type StoredInvoiceExtraction = {
+  id: string;
+  sourceFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  documentSha256: string;
+  model: string;
+  status: InvoiceExtractionStatus;
+  draft: ExtractedInvoiceDraft;
+  createdAt: string;
+  confirmedAt?: string;
+  invoiceId?: string;
 };
 
 export type InventoryProduct = {
@@ -174,6 +192,12 @@ export class InvalidInventoryReturnResolutionError extends Error {
   }
 }
 
+export class InventoryExtractionNotFoundError extends Error {
+  constructor() {
+    super("La factura extraida no existe o ya fue confirmada.");
+  }
+}
+
 type ProductRow = {
   id: string;
   sku: string | null;
@@ -232,6 +256,20 @@ type TenantReturnRow = {
   condition: InventoryCondition;
 };
 
+type InvoiceExtractionRow = {
+  id: string;
+  source_filename: string;
+  mime_type: string;
+  size_bytes: string | number;
+  document_sha256: string;
+  model: string;
+  status: InvoiceExtractionStatus;
+  draft_json: ExtractedInvoiceDraft | string;
+  created_at: Date | string;
+  confirmed_at: Date | string | null;
+  invoice_id: string | null;
+};
+
 let pool: Pool | undefined;
 let schemaPromise: Promise<void> | undefined;
 
@@ -274,12 +312,20 @@ export async function initializeInventoryStore() {
         currency TEXT NOT NULL,
         notes TEXT,
         document_name TEXT,
+        source_extraction_id TEXT,
         created_at TIMESTAMPTZ NOT NULL
       );
+
+      ALTER TABLE scanneraz_inventory_invoices
+        ADD COLUMN IF NOT EXISTS source_extraction_id TEXT;
 
       CREATE UNIQUE INDEX IF NOT EXISTS scanneraz_inventory_invoices_tenant_retailer_number_idx
       ON scanneraz_inventory_invoices (tenant_id, retailer, invoice_number)
       WHERE invoice_number IS NOT NULL;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS scanneraz_inventory_invoices_source_extraction_idx
+      ON scanneraz_inventory_invoices (source_extraction_id)
+      WHERE source_extraction_id IS NOT NULL;
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_invoices_tenant_purchased_idx
       ON scanneraz_inventory_invoices (tenant_id, purchased_at DESC);
@@ -336,6 +382,27 @@ export async function initializeInventoryStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_returns_tenant_status_idx
       ON scanneraz_inventory_returns (tenant_id, status, received_at DESC);
+
+      CREATE TABLE IF NOT EXISTS scanneraz_inventory_invoice_extractions (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        source_filename TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+        document_sha256 TEXT NOT NULL,
+        model TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending_review', 'processing', 'confirmed')),
+        draft_json JSONB NOT NULL,
+        invoice_id TEXT REFERENCES scanneraz_inventory_invoices(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        confirmed_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_inventory_invoice_extractions_tenant_created_idx
+      ON scanneraz_inventory_invoice_extractions (tenant_id, created_at DESC);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS scanneraz_inventory_invoice_extractions_tenant_document_idx
+      ON scanneraz_inventory_invoice_extractions (tenant_id, document_sha256);
     `)
     .then(() => undefined)
     .catch((error: unknown) => {
@@ -365,8 +432,8 @@ export async function createInventoryInvoice(
     await client.query(
       `
         INSERT INTO scanneraz_inventory_invoices (
-          id, tenant_id, retailer, invoice_number, purchased_at, currency, notes, document_name, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          id, tenant_id, retailer, invoice_number, purchased_at, currency, notes, document_name, source_extraction_id, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `,
       [
         invoiceId,
@@ -377,6 +444,7 @@ export async function createInventoryInvoice(
         currency,
         normalizeOptionalText(input.notes),
         normalizeOptionalText(input.documentName),
+        normalizeOptionalText(input.sourceExtractionId),
         createdAt
       ]
     );
@@ -434,6 +502,126 @@ export async function createInventoryInvoice(
     throw error;
   } finally {
     client.release();
+  }
+}
+
+export async function saveInvoiceExtraction(
+  tenantId: string,
+  input: {
+    sourceFilename: string;
+    mimeType: string;
+    sizeBytes: number;
+    documentSha256: string;
+    model: string;
+    draft: ExtractedInvoiceDraft;
+  }
+): Promise<StoredInvoiceExtraction> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const id = crypto.randomUUID();
+  const createdAt = new Date();
+  const result = await inventoryPool.query<InvoiceExtractionRow>(
+    `
+      INSERT INTO scanneraz_inventory_invoice_extractions (
+        id, tenant_id, source_filename, mime_type, size_bytes, document_sha256, model, status, draft_json, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_review', $8::jsonb, $9)
+      ON CONFLICT (tenant_id, document_sha256) DO UPDATE
+      SET source_filename = scanneraz_inventory_invoice_extractions.source_filename
+      RETURNING
+        id, source_filename, mime_type, size_bytes, document_sha256, model, status, draft_json,
+        created_at, confirmed_at, invoice_id
+    `,
+    [
+      id,
+      tenantId,
+      normalizeRequiredText(input.sourceFilename, "sourceFilename"),
+      normalizeRequiredText(input.mimeType, "mimeType"),
+      positiveInteger(input.sizeBytes, "sizeBytes"),
+      normalizeRequiredText(input.documentSha256, "documentSha256"),
+      normalizeRequiredText(input.model, "model"),
+      JSON.stringify(input.draft),
+      createdAt
+    ]
+  );
+
+  return toStoredInvoiceExtraction(result.rows[0]!);
+}
+
+export async function findInvoiceExtractionByDocumentHash(
+  tenantId: string,
+  documentSha256: string
+): Promise<StoredInvoiceExtraction | undefined> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<InvoiceExtractionRow>(
+    `
+      SELECT
+        id, source_filename, mime_type, size_bytes, document_sha256, model, status, draft_json,
+        created_at, confirmed_at, invoice_id
+      FROM scanneraz_inventory_invoice_extractions
+      WHERE tenant_id = $1 AND document_sha256 = $2
+      LIMIT 1
+    `,
+    [tenantId, normalizeRequiredText(documentSha256, "documentSha256")]
+  );
+
+  return result.rows[0] ? toStoredInvoiceExtraction(result.rows[0]) : undefined;
+}
+
+export async function confirmInvoiceExtraction(
+  tenantId: string,
+  input: { extractionId: string; invoice: CreateInventoryInvoiceInput }
+) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const claimed = await inventoryPool.query<{ id: string; source_filename: string }>(
+    `
+      UPDATE scanneraz_inventory_invoice_extractions
+      SET status = 'processing'
+      WHERE id = $1 AND tenant_id = $2 AND status = 'pending_review'
+      RETURNING id, source_filename
+    `,
+    [input.extractionId, tenantId]
+  );
+
+  if (!claimed.rows[0]) {
+    throw new InventoryExtractionNotFoundError();
+  }
+
+  try {
+    const invoice = await createInventoryInvoice(tenantId, {
+      ...input.invoice,
+      documentName: input.invoice.documentName ?? claimed.rows[0].source_filename,
+      sourceExtractionId: input.extractionId
+    });
+    const confirmedAt = new Date();
+    const updated = await inventoryPool.query<InvoiceExtractionRow>(
+      `
+        UPDATE scanneraz_inventory_invoice_extractions
+        SET status = 'confirmed', invoice_id = $3, confirmed_at = $4
+        WHERE id = $1 AND tenant_id = $2 AND status = 'processing'
+        RETURNING
+          id, source_filename, mime_type, size_bytes, document_sha256, model, status, draft_json,
+          created_at, confirmed_at, invoice_id
+      `,
+      [input.extractionId, tenantId, invoice.id, confirmedAt]
+    );
+
+    if (!updated.rows[0]) {
+      throw new InventoryExtractionNotFoundError();
+    }
+
+    return { invoice, extraction: toStoredInvoiceExtraction(updated.rows[0]) };
+  } catch (error) {
+    await inventoryPool.query(
+      `
+        UPDATE scanneraz_inventory_invoice_extractions
+        SET status = 'pending_review'
+        WHERE id = $1 AND tenant_id = $2 AND status = 'processing'
+      `,
+      [input.extractionId, tenantId]
+    );
+    throw error;
   }
 }
 
@@ -1034,6 +1222,26 @@ function toInventoryReturnCase(row: ReturnRow): InventoryReturnCase {
     notes: row.notes ?? undefined,
     receivedAt: new Date(row.received_at).toISOString(),
     completedAt: row.completed_at ? new Date(row.completed_at).toISOString() : undefined
+  };
+}
+
+function toStoredInvoiceExtraction(row: InvoiceExtractionRow): StoredInvoiceExtraction {
+  const draft = typeof row.draft_json === "string"
+    ? JSON.parse(row.draft_json) as ExtractedInvoiceDraft
+    : row.draft_json;
+
+  return {
+    id: row.id,
+    sourceFilename: row.source_filename,
+    mimeType: row.mime_type,
+    sizeBytes: numberValue(row.size_bytes),
+    documentSha256: row.document_sha256,
+    model: row.model,
+    status: row.status,
+    draft,
+    createdAt: new Date(row.created_at).toISOString(),
+    confirmedAt: row.confirmed_at ? new Date(row.confirmed_at).toISOString() : undefined,
+    invoiceId: row.invoice_id ?? undefined
   };
 }
 

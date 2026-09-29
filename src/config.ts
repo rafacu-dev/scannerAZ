@@ -37,6 +37,12 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   KEEPA_API_KEY: z.string().min(1).optional(),
+  // Invoice documents are sent to OpenAI only while extracting a reviewable
+  // draft. This key stays server-side in Render and is never sent to Expo.
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  OPENAI_INVOICE_MODEL: z.string().trim().min(1).default("gpt-4o-mini"),
+  OPENAI_INVOICE_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(120_000).default(90_000),
+  INVOICE_EXTRACTION_MAX_FILE_BYTES: z.coerce.number().int().min(1_000_000).max(50_000_000).default(20_000_000),
   TARGET_PROVIDER: z.enum(["public-web", "unwrangle"]).default("public-web"),
   TARGET_API_KEY: z.string().min(1).optional(),
   DATA_DIR: z.string().default("data"),
@@ -108,6 +114,12 @@ export function assertOAuthSecurityConfig() {
 export function assertKeepaConfig() {
   if (!config.KEEPA_API_KEY) {
     throw new Error("Missing Keepa configuration: KEEPA_API_KEY");
+  }
+}
+
+export function assertInvoiceExtractionConfig() {
+  if (!config.OPENAI_API_KEY) {
+    throw new Error("Missing invoice extraction configuration: OPENAI_API_KEY");
   }
 }
 

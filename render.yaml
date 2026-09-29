@@ -59,6 +59,12 @@ services:
       # Do not put its value in this Blueprint or repository.
       - key: SCANNERAZ_EDGE_SHARED_SECRET
         sync: false
+      # Configure this server-only secret in Render before invoice analysis is
+      # enabled. Never add it to Expo, EAS, Cloudflare, or this repository.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_INVOICE_MODEL
+        value: gpt-4o-mini
 
 databases:
   - name: scanneraz-db

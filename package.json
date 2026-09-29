@@ -7,7 +7,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "build": "tsc && rm -rf dist/public && cp -R public dist/public",
-    "test:auth": "tsx --test src/auth/passwords.test.ts src/amazon/oauth.test.ts src/amazon/spapi.test.ts src/inventory/store.test.ts",
+    "test:auth": "tsx --test src/auth/passwords.test.ts src/amazon/oauth.test.ts src/amazon/spapi.test.ts src/inventory/store.test.ts src/inventory/extraction.test.ts",
     "amazon:check": "tsx src/scripts/check-amazon-restrictions.ts",
     "export:target": "tsx src/scripts/export-target-clearance.ts",
     "typecheck": "tsc --noEmit"
@@ -18,12 +18,14 @@
     "express": "^4.19.2",
     "express-rate-limit": "^8.7.0",
     "helmet": "^7.1.0",
+    "multer": "^2.4.0",
     "pg": "^8.23.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/cheerio": "^0.22.35",
     "@types/express": "^4.17.21",
+    "@types/multer": "^2.3.0",
     "@types/node": "^22.5.4",
     "@types/pg": "^8.23.1",
     "tsx": "^4.19.0",
