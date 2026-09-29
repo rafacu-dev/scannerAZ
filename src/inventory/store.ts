@@ -1131,12 +1131,12 @@ export async function completeAmazonSalesSync(
         updated_at = $6
       WHERE tenant_id = $1 AND connection_id = $2
     `,
-    [tenantId, work.connectionId, nextPageToken ?? null, completed, work.startedAt, now]
+    [tenantId, work.connectionId, nextPageToken ?? null, completed, now, now]
   );
 
   return {
     connectionId: work.connectionId,
-    lastSyncedAt: completed ? work.startedAt : undefined,
+    lastSyncedAt: completed ? now.toISOString() : undefined,
     hasMore: !completed
   } satisfies AmazonSalesSyncState;
 }
