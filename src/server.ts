@@ -18,6 +18,8 @@ import {
 } from "./amazon/oauth.js";
 import { publicAmazonRouter } from "./amazon/publicRoutes.js";
 import { amazonRouter } from "./amazon/routes.js";
+import { inventoryRouter } from "./inventory/routes.js";
+import { initializeInventoryStore } from "./inventory/store.js";
 import {
   clearSessionCookie,
   endRequestSession,
@@ -298,6 +300,14 @@ app.use(
   requireTenantSession,
   publicTenantRateLimit,
   publicAmazonRouter
+);
+app.use(
+  "/api/public/inventory",
+  markSensitiveResponse,
+  requirePublicAppAccess,
+  requireTenantSession,
+  publicTenantRateLimit,
+  inventoryRouter
 );
 app.use("/api/retail", retailRouter);
 app.use("/api/retail/target", targetRouter);
@@ -667,7 +677,8 @@ void startServer();
 
 async function startServer() {
   try {
-    await Promise.all([initializeAmazonConnectionStore(), initializeAccountStore()]);
+    await initializeAccountStore();
+    await Promise.all([initializeAmazonConnectionStore(), initializeInventoryStore()]);
     app.listen(config.PORT, () => {
       console.log(`ScannerAz listening at ${config.APP_BASE_URL}`);
     });
