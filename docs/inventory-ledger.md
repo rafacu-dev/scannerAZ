@@ -35,10 +35,12 @@ must review and explicitly confirm the draft before any purchase movement is
 created. Confirmation records the extraction ID against the resulting invoice,
 which preserves the extracted invoice-wide amounts and time for audit.
 
-`OPENAI_API_KEY` is a Render-only secret. The mobile app never receives it.
-`OPENAI_INVOICE_MODEL` defaults to `gpt-4o-mini` and can be changed on Render
-when a higher-accuracy model is appropriate. The API rate-limits analysis per
-tenant to control accidental repeat requests and cost.
+`WARASOFT_AI_GATEWAY_KEY` is a Render-only secret. The mobile app never
+receives it, and ScannerAz never receives the upstream provider credential.
+`WARASOFT_AI_GATEWAY_URL` points to Warasoft's bounded Responses endpoint;
+`WARASOFT_AI_INVOICE_MODEL` defaults to `gpt-4o-mini`. The gateway requires an
+explicit model allowlist, rate, daily-token, and monthly-budget limits, while
+ScannerAz also rate-limits analysis per tenant to control accidental repeats.
 
 To retain original PDFs/photos for audit or accounting, add private object
 storage (for example R2/S3) with tenant-scoped signed uploads and short-lived

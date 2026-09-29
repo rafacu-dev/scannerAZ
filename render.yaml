@@ -59,11 +59,14 @@ services:
       # Do not put its value in this Blueprint or repository.
       - key: SCANNERAZ_EDGE_SHARED_SECRET
         sync: false
-      # Configure this server-only secret in Render before invoice analysis is
-      # enabled. Never add it to Expo, EAS, Cloudflare, or this repository.
-      - key: OPENAI_API_KEY
+      # Configure this server-only key in Render before invoice analysis is
+      # enabled. It reaches the provider only through the Warasoft gateway and
+      # never belongs in Expo, EAS, Cloudflare, or this repository.
+      - key: WARASOFT_AI_GATEWAY_KEY
         sync: false
-      - key: OPENAI_INVOICE_MODEL
+      - key: WARASOFT_AI_GATEWAY_URL
+        value: https://warasoft.com/api/ai/v1/responses/
+      - key: WARASOFT_AI_INVOICE_MODEL
         value: gpt-4o-mini
 
 databases:

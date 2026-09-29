@@ -37,11 +37,13 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   KEEPA_API_KEY: z.string().min(1).optional(),
-  // Invoice documents are sent to OpenAI only while extracting a reviewable
-  // draft. This key stays server-side in Render and is never sent to Expo.
-  OPENAI_API_KEY: z.string().min(1).optional(),
-  OPENAI_INVOICE_MODEL: z.string().trim().min(1).default("gpt-4o-mini"),
-  OPENAI_INVOICE_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(120_000).default(90_000),
+  // Invoice documents go through the private Warasoft AI Gateway. The
+  // gateway key stays server-side in Render and is never sent to Expo.
+  WARASOFT_AI_GATEWAY_URL: z.string().url().optional(),
+  WARASOFT_AI_GATEWAY_KEY: z.string().min(1).optional(),
+  WARASOFT_AI_INVOICE_MODEL: z.string().trim().min(1).default("gpt-4o-mini"),
+  WARASOFT_AI_PROJECT: z.coerce.number().int().positive().optional(),
+  INVOICE_EXTRACTION_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(120_000).default(90_000),
   INVOICE_EXTRACTION_MAX_FILE_BYTES: z.coerce.number().int().min(1_000_000).max(50_000_000).default(20_000_000),
   TARGET_PROVIDER: z.enum(["public-web", "unwrangle"]).default("public-web"),
   TARGET_API_KEY: z.string().min(1).optional(),
@@ -118,8 +120,15 @@ export function assertKeepaConfig() {
 }
 
 export function assertInvoiceExtractionConfig() {
-  if (!config.OPENAI_API_KEY) {
-    throw new Error("Missing invoice extraction configuration: OPENAI_API_KEY");
+  const missing = [
+    ["WARASOFT_AI_GATEWAY_URL", config.WARASOFT_AI_GATEWAY_URL],
+    ["WARASOFT_AI_GATEWAY_KEY", config.WARASOFT_AI_GATEWAY_KEY]
+  ]
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+
+  if (missing.length > 0) {
+    throw new Error(`Missing invoice extraction configuration: ${missing.join(", ")}`);
   }
 }
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildInvoiceExtractionGatewayRequest,
   detectInvoiceMimeType,
   invoiceDocumentSha256,
   isSupportedInvoiceMimeType
@@ -26,4 +27,19 @@ test("uses a stable digest to avoid repeated model analyses for the same invoice
   const document = Buffer.from("%PDF-1.7\ninvoice body");
   assert.equal(invoiceDocumentSha256(document), invoiceDocumentSha256(Buffer.from(document)));
   assert.notEqual(invoiceDocumentSha256(document), invoiceDocumentSha256(Buffer.from("%PDF-1.7\nother")));
+});
+
+test("builds a bounded Warasoft Responses request for a reviewable invoice draft", () => {
+  const request = buildInvoiceExtractionGatewayRequest({
+    filename: "receipt.jpg",
+    mimeType: "image/jpeg",
+    buffer: Buffer.from([0xff, 0xd8, 0xff, 0xe0])
+  }, "gpt-4o-mini");
+
+  assert.equal(request.model, "gpt-4o-mini");
+  assert.equal(request.max_output_tokens, 4_096);
+  assert.equal(request.input[1]?.content[0]?.type, "input_image");
+  assert.match(String(request.input[1]?.content[0]?.image_url), /^data:image\/jpeg;base64,/);
+  assert.equal(request.text.format.type, "json_schema");
+  assert.equal(request.text.format.strict, true);
 });
