@@ -261,10 +261,17 @@ inventoryRouter.post("/amazon-sales/:connectionId/sync", amazonSalesSyncRateLimi
     }
 
     if (error instanceof AmazonOrdersRequestError) {
-      res.status(error.status === 429 ? 429 : 409).json({
+      const authorizationRequired = error.status === 401 || error.status === 403;
+      res.status(error.status === 429 ? 429 : authorizationRequired ? 403 : 502).json({
         error: error.status === 429
           ? "Amazon esta limitando la sincronizacion. Espera unos minutos e intenta de nuevo."
-          : "Amazon aun no autorizo el acceso a pedidos para esta conexion. Vuelve a autorizar la cuenta cuando el rol este habilitado."
+          : authorizationRequired
+            ? "Amazon necesita que vuelvas a autorizar el acceso a ventas para esta conexion."
+            : "Amazon no pudo cargar los pedidos en este momento. Intenta de nuevo en unos minutos.",
+        code: authorizationRequired
+          ? "amazon_orders_authorization_required"
+          : "amazon_orders_sync_unavailable",
+        reauthorize: authorizationRequired
       });
       return;
     }
