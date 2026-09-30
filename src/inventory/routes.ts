@@ -40,6 +40,7 @@ import {
   recordAmazonCustomerReturn,
   recordInventorySale,
   recordRetailerReturn,
+  refreshPendingInvoiceExtraction,
   resolveInventoryAsinMappings,
   resolveInventoryReturn,
   saveInvoiceExtraction,
@@ -103,6 +104,7 @@ const conditionSchema = z.enum([
 ]);
 const optionalText = z.string().trim().max(500).optional().transform((value) => value || undefined);
 const optionalReference = z.string().trim().max(160).optional().transform((value) => value || undefined);
+const requiredInvoiceReference = z.string().trim().min(1).max(160);
 const occurredAtSchema = z.string().datetime().optional();
 const amazonSalesSyncSchema = z.object({
   // A first sync defaults to ninety days. Amazon keeps order history for a
@@ -113,7 +115,8 @@ const amazonSalesSyncSchema = z.object({
 
 const invoiceSchema = z.object({
   retailer: z.string().trim().min(1).max(100),
-  invoiceNumber: optionalReference,
+  invoiceNumber: requiredInvoiceReference,
+  invoiceBarcode: optionalReference,
   purchasedAt: occurredAtSchema,
   currency: z.string().trim().length(3).default("USD"),
   notes: optionalText,
@@ -432,7 +435,7 @@ inventoryRouter.post("/invoice-extractions", invoiceExtractionRateLimit, async (
 
     const existing = await findInvoiceExtractionByDocumentHash(tenantId, documentSha256);
 
-    if (existing) {
+    if (existing && (existing.status !== "pending_review" || existing.draft.invoiceNumber)) {
       res.json({ extraction: existing, reused: true });
       return;
     }
@@ -442,15 +445,24 @@ inventoryRouter.post("/invoice-extractions", invoiceExtractionRateLimit, async (
       mimeType,
       buffer: file.buffer
     });
-    const extraction = await saveInvoiceExtraction(tenantId, {
-      sourceFilename: safeFilename(file.originalname),
-      mimeType,
-      sizeBytes: file.size,
-      documentSha256: extracted.documentSha256,
-      model: extracted.model,
-      draft: extracted.draft
-    });
-    res.status(201).json({ extraction });
+    const extraction = existing
+      ? await refreshPendingInvoiceExtraction(tenantId, existing.id, {
+        sourceFilename: safeFilename(file.originalname),
+        mimeType,
+        sizeBytes: file.size,
+        model: extracted.model,
+        draft: extracted.draft
+      })
+      : await saveInvoiceExtraction(tenantId, {
+        sourceFilename: safeFilename(file.originalname),
+        mimeType,
+        sizeBytes: file.size,
+        documentSha256: extracted.documentSha256,
+        model: extracted.model,
+        draft: extracted.draft
+      });
+
+    res.status(existing ? 200 : 201).json({ extraction: extraction ?? existing, refreshed: Boolean(existing) });
   } catch (error) {
     respondToInventoryError(error, res, next);
   } finally {

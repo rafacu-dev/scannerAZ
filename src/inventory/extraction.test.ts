@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildInvoiceExtractionGatewayRequest,
+  buildInvoiceReferenceGatewayRequest,
   detectInvoiceMimeType,
   invoiceDocumentSha256,
   isSupportedInvoiceMimeType,
@@ -39,10 +40,29 @@ test("builds a bounded Warasoft Responses request for a reviewable invoice draft
 
   assert.equal(request.model, "gpt-4o-mini");
   assert.equal(request.max_output_tokens, 4_096);
-  assert.equal(request.input[1]?.content[0]?.type, "input_image");
-  assert.match(String(request.input[1]?.content[0]?.image_url), /^data:image\/jpeg;base64,/);
+  const document = request.input[1]?.content[0];
+  assert.equal(document?.type, "input_image");
+  assert.ok(document && "image_url" in document);
+  assert.match(String(document.image_url), /^data:image\/jpeg;base64,/);
   assert.equal(request.text.format.type, "json_schema");
   assert.equal(request.text.format.strict, true);
+});
+
+test("uses a focused second pass for a retail receipt reference", () => {
+  const request = buildInvoiceReferenceGatewayRequest({
+    filename: "receipt.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.7\nreceipt")
+  }, "gpt-4o-mini");
+
+  assert.equal(request.max_output_tokens, 800);
+  const prompt = request.input[0]?.content[0];
+  assert.ok(prompt && "text" in prompt);
+  assert.match(String(prompt.text), /TC#/);
+  const document = request.input[1]?.content[0];
+  assert.equal(document?.type, "input_file");
+  assert.ok(document && "file_data" in document);
+  assert.match(String(document.file_data), /^data:application\/pdf;base64,/);
 });
 
 test("moves a retail UPC out of a generic numeric SKU field", () => {
@@ -67,4 +87,15 @@ test("moves a retail UPC out of a generic numeric SKU field", () => {
     sku: undefined,
     asin: undefined
   });
+});
+
+test("uses a readable receipt barcode as the purchase reference when needed", () => {
+  const draft = normalizeExtractedInvoiceDraft({
+    invoiceBarcode: "TC-1610445422293821871",
+    lines: [],
+    warnings: []
+  });
+
+  assert.equal(draft.invoiceNumber, "TC-1610445422293821871");
+  assert.equal(draft.invoiceReferenceLabel, "Código de barras");
 });

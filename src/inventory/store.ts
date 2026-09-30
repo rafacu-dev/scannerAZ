@@ -41,7 +41,8 @@ export type InventoryInvoiceLineInput = {
 
 export type CreateInventoryInvoiceInput = {
   retailer: string;
-  invoiceNumber?: string;
+  invoiceNumber: string;
+  invoiceBarcode?: string;
   purchasedAt?: string;
   currency: string;
   notes?: string;
@@ -454,6 +455,7 @@ export async function initializeInventoryStore() {
         tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
         retailer TEXT NOT NULL,
         invoice_number TEXT,
+        invoice_barcode TEXT,
         purchased_at DATE NOT NULL,
         currency TEXT NOT NULL,
         notes TEXT,
@@ -465,6 +467,9 @@ export async function initializeInventoryStore() {
       ALTER TABLE scanneraz_inventory_invoices
         ADD COLUMN IF NOT EXISTS source_extraction_id TEXT;
 
+      ALTER TABLE scanneraz_inventory_invoices
+        ADD COLUMN IF NOT EXISTS invoice_barcode TEXT;
+
       CREATE UNIQUE INDEX IF NOT EXISTS scanneraz_inventory_invoices_tenant_retailer_number_idx
       ON scanneraz_inventory_invoices (tenant_id, retailer, invoice_number)
       WHERE invoice_number IS NOT NULL;
@@ -475,6 +480,10 @@ export async function initializeInventoryStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_invoices_tenant_purchased_idx
       ON scanneraz_inventory_invoices (tenant_id, purchased_at DESC);
+
+      CREATE INDEX IF NOT EXISTS scanneraz_inventory_invoices_tenant_barcode_idx
+      ON scanneraz_inventory_invoices (tenant_id, invoice_barcode)
+      WHERE invoice_barcode IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS scanneraz_inventory_lots (
         id TEXT PRIMARY KEY,
@@ -632,7 +641,8 @@ export async function createInventoryInvoice(
   const createdAt = new Date();
   const purchasedAt = input.purchasedAt ? new Date(input.purchasedAt) : createdAt;
   const retailer = normalizeRequiredText(input.retailer, "retailer");
-  const invoiceNumber = normalizeOptionalText(input.invoiceNumber);
+  const invoiceNumber = normalizeRequiredText(input.invoiceNumber, "invoiceNumber");
+  const invoiceBarcode = normalizeOptionalText(input.invoiceBarcode);
   const currency = normalizeCurrency(input.currency);
   const client = await inventoryPool.connect();
 
@@ -641,14 +651,15 @@ export async function createInventoryInvoice(
     await client.query(
       `
         INSERT INTO scanneraz_inventory_invoices (
-          id, tenant_id, retailer, invoice_number, purchased_at, currency, notes, document_name, source_extraction_id, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          id, tenant_id, retailer, invoice_number, invoice_barcode, purchased_at, currency, notes, document_name, source_extraction_id, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       `,
       [
         invoiceId,
         tenantId,
         retailer,
         invoiceNumber,
+        invoiceBarcode,
         purchasedAt.toISOString().slice(0, 10),
         currency,
         normalizeOptionalText(input.notes),
@@ -763,6 +774,47 @@ export async function saveInvoiceExtraction(
   );
 
   return toStoredInvoiceExtraction(result.rows[0]!);
+}
+
+export async function refreshPendingInvoiceExtraction(
+  tenantId: string,
+  extractionId: string,
+  input: {
+    sourceFilename: string;
+    mimeType: string;
+    sizeBytes: number;
+    model: string;
+    draft: ExtractedInvoiceDraft;
+  }
+): Promise<StoredInvoiceExtraction | undefined> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<InvoiceExtractionRow>(
+    `
+      UPDATE scanneraz_inventory_invoice_extractions
+      SET
+        source_filename = $3,
+        mime_type = $4,
+        size_bytes = $5,
+        model = $6,
+        draft_json = $7::jsonb
+      WHERE id = $1 AND tenant_id = $2 AND status = 'pending_review'
+      RETURNING
+        id, source_filename, mime_type, size_bytes, document_sha256, model, status, draft_json,
+        created_at, confirmed_at, invoice_id
+    `,
+    [
+      normalizeRequiredText(extractionId, "extractionId"),
+      tenantId,
+      normalizeRequiredText(input.sourceFilename, "sourceFilename"),
+      normalizeRequiredText(input.mimeType, "mimeType"),
+      positiveInteger(input.sizeBytes, "sizeBytes"),
+      normalizeRequiredText(input.model, "model"),
+      JSON.stringify(input.draft)
+    ]
+  );
+
+  return result.rows[0] ? toStoredInvoiceExtraction(result.rows[0]) : undefined;
 }
 
 export async function findInvoiceExtractionByDocumentHash(
