@@ -66,6 +66,15 @@ export type StoredInvoiceExtraction = {
   invoiceId?: string;
 };
 
+export type InventoryAsinMapping = {
+  upc: string;
+  asin: string;
+  sku?: string;
+  title?: string;
+  imageUrl?: string;
+  source: "saved_mapping";
+};
+
 export type InventoryProduct = {
   id: string;
   sku?: string;
@@ -312,6 +321,14 @@ type InvoiceExtractionRow = {
   invoice_id: string | null;
 };
 
+type AsinMappingRow = {
+  upc: string;
+  asin: string;
+  seller_sku: string | null;
+  title: string | null;
+  image_url: string | null;
+};
+
 type AmazonSaleLineRow = {
   id: string;
   product_id: string | null;
@@ -391,6 +408,46 @@ export async function initializeInventoryStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_products_tenant_updated_idx
       ON scanneraz_inventory_products (tenant_id, updated_at DESC);
+
+      -- A retailer receipt usually has a UPC but not an Amazon ASIN. Keep the
+      -- deliberate UPC-to-ASIN relation outside an individual invoice so a
+      -- future receipt can be reconciled without asking the seller again.
+      CREATE TABLE IF NOT EXISTS scanneraz_inventory_asin_mappings (
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        upc TEXT NOT NULL,
+        asin TEXT NOT NULL,
+        seller_sku TEXT,
+        title TEXT,
+        image_url TEXT,
+        source TEXT NOT NULL CHECK (source IN ('invoice', 'legacy_inventory')),
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tenant_id, upc)
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_inventory_asin_mappings_tenant_asin_idx
+      ON scanneraz_inventory_asin_mappings (tenant_id, asin);
+
+      -- Preserve relationships already present in inventory from before this
+      -- dedicated mapping table existed. A later explicit invoice selection
+      -- can still update a legacy row through the normal upsert below.
+      INSERT INTO scanneraz_inventory_asin_mappings (
+        tenant_id, upc, asin, seller_sku, title, image_url, source, created_at, updated_at
+      )
+      SELECT
+        tenant_id,
+        regexp_replace(COALESCE(upc, ''), '[^0-9]', '', 'g'),
+        UPPER(regexp_replace(COALESCE(asin, ''), '\\s+', '', 'g')),
+        sku,
+        title,
+        image_url,
+        'legacy_inventory',
+        created_at,
+        updated_at
+      FROM scanneraz_inventory_products
+      WHERE regexp_replace(COALESCE(upc, ''), '[^0-9]', '', 'g') ~ '^[0-9]{8,14}$'
+        AND UPPER(regexp_replace(COALESCE(asin, ''), '\\s+', '', 'g')) ~ '^[A-Z0-9]{10}$'
+      ON CONFLICT (tenant_id, upc) DO NOTHING;
 
       CREATE TABLE IF NOT EXISTS scanneraz_inventory_invoices (
         id TEXT PRIMARY KEY,
@@ -601,8 +658,11 @@ export async function createInventoryInvoice(
       ]
     );
 
-    for (const line of input.lines) {
+    const lines = await resolveInvoiceLinesFromMappings(client, tenantId, input.lines);
+
+    for (const line of lines) {
       const product = await upsertProduct(client, tenantId, line, createdAt);
+      await upsertInventoryAsinMapping(client, tenantId, line, createdAt);
       const lotId = crypto.randomUUID();
       const quantity = positiveInteger(line.quantity, "quantity");
       const unitCostCents = nonNegativeInteger(line.unitCostCents, "unitCostCents");
@@ -643,7 +703,7 @@ export async function createInventoryInvoice(
     }
 
     await client.query("COMMIT");
-    return { id: invoiceId, purchasedAt: purchasedAt.toISOString(), lineCount: input.lines.length };
+    return { id: invoiceId, purchasedAt: purchasedAt.toISOString(), lineCount: lines.length };
   } catch (error) {
     await client.query("ROLLBACK");
 
@@ -655,6 +715,12 @@ export async function createInventoryInvoice(
   } finally {
     client.release();
   }
+}
+
+export async function resolveInventoryAsinMappings(tenantId: string, upcs: string[]) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  return Array.from((await findInventoryAsinMappings(inventoryPool, tenantId, upcs)).values());
 }
 
 export async function saveInvoiceExtraction(
@@ -1745,7 +1811,7 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
 export function inventoryProductKey(input: Pick<InventoryInvoiceLineInput, "title" | "sku" | "asin" | "upc">) {
   const sku = normalizeCode(input.sku);
   const asin = normalizeCode(input.asin);
-  const upc = normalizeCode(input.upc);
+  const upc = normalizeInventoryUpc(input.upc) ?? normalizeCode(input.upc);
 
   if (sku) {
     return `sku:${sku}`;
@@ -1810,6 +1876,110 @@ async function recordOutboundMovement(
   }
 }
 
+async function resolveInvoiceLinesFromMappings(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  lines: InventoryInvoiceLineInput[]
+) {
+  const mappings = await findInventoryAsinMappings(
+    client,
+    tenantId,
+    lines.map((line) => line.upc ?? "")
+  );
+
+  return lines.map((line) => {
+    if (normalizeAmazonAsin(line.asin)) {
+      return line;
+    }
+
+    const upc = normalizeInventoryUpc(line.upc);
+    const mapping = upc ? mappings.get(upc) : undefined;
+
+    if (!mapping) {
+      return line;
+    }
+
+    return {
+      ...line,
+      asin: mapping.asin,
+      imageUrl: line.imageUrl ?? mapping.imageUrl
+    };
+  });
+}
+
+async function findInventoryAsinMappings(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  values: string[]
+) {
+  const upcs = Array.from(new Set(values
+    .map((value) => normalizeInventoryUpc(value))
+    .filter((value): value is string => Boolean(value))));
+
+  if (!upcs.length) {
+    return new Map<string, InventoryAsinMapping>();
+  }
+
+  const result = await client.query<AsinMappingRow>(
+    `
+      SELECT upc, asin, seller_sku, title, image_url
+      FROM scanneraz_inventory_asin_mappings
+      WHERE tenant_id = $1 AND upc = ANY($2::text[])
+    `,
+    [tenantId, upcs]
+  );
+
+  return new Map(result.rows.map((row) => [
+    row.upc,
+    {
+      upc: row.upc,
+      asin: row.asin,
+      sku: row.seller_sku ?? undefined,
+      title: row.title ?? undefined,
+      imageUrl: row.image_url ?? undefined,
+      source: "saved_mapping" as const
+    }
+  ]));
+}
+
+async function upsertInventoryAsinMapping(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  line: InventoryInvoiceLineInput,
+  now: Date
+) {
+  const upc = normalizeInventoryUpc(line.upc);
+  const asin = normalizeAmazonAsin(line.asin);
+
+  if (!upc || !asin) {
+    return;
+  }
+
+  await client.query(
+    `
+      INSERT INTO scanneraz_inventory_asin_mappings (
+        tenant_id, upc, asin, seller_sku, title, image_url, source, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'invoice', $7, $7)
+      ON CONFLICT (tenant_id, upc) DO UPDATE SET
+        asin = EXCLUDED.asin,
+        seller_sku = COALESCE(EXCLUDED.seller_sku, scanneraz_inventory_asin_mappings.seller_sku),
+        title = EXCLUDED.title,
+        image_url = COALESCE(EXCLUDED.image_url, scanneraz_inventory_asin_mappings.image_url),
+        source = 'invoice',
+        updated_at = EXCLUDED.updated_at
+    `,
+    [
+      tenantId,
+      upc,
+      asin,
+      normalizeCode(line.sku),
+      normalizeOptionalText(line.title),
+      normalizeOptionalText(line.imageUrl),
+      now
+    ]
+  );
+}
+
 async function upsertProduct(
   client: Pick<PoolClient, "query">,
   tenantId: string,
@@ -1817,6 +1987,59 @@ async function upsertProduct(
   now: Date
 ) {
   const title = normalizeRequiredText(line.title, "title");
+  const productKey = inventoryProductKey(line);
+  const sku = normalizeCode(line.sku);
+  const asin = normalizeAmazonAsin(line.asin) ?? normalizeCode(line.asin);
+  const upc = normalizeInventoryUpc(line.upc) ?? normalizeCode(line.upc);
+  const existing = await client.query<TenantProductRow>(
+    `
+      SELECT id, title
+      FROM scanneraz_inventory_products
+      WHERE tenant_id = $1 AND (
+        product_key = $2
+        OR ($3::text IS NOT NULL AND UPPER(REPLACE(COALESCE(sku, ''), ' ', '')) = $3)
+        OR ($4::text IS NOT NULL AND UPPER(REPLACE(COALESCE(asin, ''), ' ', '')) = $4)
+        OR ($5::text IS NOT NULL AND regexp_replace(COALESCE(upc, ''), '[^0-9]', '', 'g') = $5)
+      )
+      ORDER BY
+        CASE WHEN product_key = $2 THEN 0 ELSE 1 END,
+        CASE WHEN $4::text IS NOT NULL AND UPPER(REPLACE(COALESCE(asin, ''), ' ', '')) = $4 THEN 0 ELSE 1 END,
+        CASE WHEN $5::text IS NOT NULL AND regexp_replace(COALESCE(upc, ''), '[^0-9]', '', 'g') = $5 THEN 0 ELSE 1 END,
+        updated_at DESC
+      LIMIT 1
+      FOR UPDATE
+    `,
+    [tenantId, productKey, sku ?? null, asin ?? null, upc ?? null]
+  );
+
+  if (existing.rows[0]) {
+    const updated = await client.query<TenantProductRow>(
+      `
+        UPDATE scanneraz_inventory_products
+        SET
+          sku = COALESCE($2, sku),
+          asin = COALESCE($3, asin),
+          upc = COALESCE($4, upc),
+          title = $5,
+          image_url = COALESCE($6, image_url),
+          updated_at = $7
+        WHERE id = $1 AND tenant_id = $8
+        RETURNING id, title
+      `,
+      [
+        existing.rows[0].id,
+        sku ?? null,
+        asin ?? null,
+        upc ?? null,
+        title,
+        normalizeOptionalText(line.imageUrl),
+        now,
+        tenantId
+      ]
+    );
+    return updated.rows[0]!;
+  }
+
   const result = await client.query<TenantProductRow>(
     `
       INSERT INTO scanneraz_inventory_products (
@@ -1834,10 +2057,10 @@ async function upsertProduct(
     [
       crypto.randomUUID(),
       tenantId,
-      inventoryProductKey(line),
-      normalizeCode(line.sku),
-      normalizeCode(line.asin),
-      normalizeCode(line.upc),
+      productKey,
+      sku,
+      asin,
+      upc,
       title,
       normalizeOptionalText(line.imageUrl),
       now
@@ -2179,6 +2402,16 @@ function normalizeOptionalText(value?: string) {
 function normalizeCode(value?: string) {
   const normalized = normalizeOptionalText(value)?.toUpperCase().replace(/\s+/g, "");
   return normalized || undefined;
+}
+
+function normalizeInventoryUpc(value?: string) {
+  const digits = normalizeOptionalText(value)?.replace(/[^0-9]/g, "");
+  return digits && /^\d{8,14}$/.test(digits) ? digits : undefined;
+}
+
+function normalizeAmazonAsin(value?: string) {
+  const asin = normalizeCode(value);
+  return asin && /^[A-Z0-9]{10}$/.test(asin) ? asin : undefined;
 }
 
 function normalizeCurrency(value: string) {

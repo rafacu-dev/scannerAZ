@@ -244,28 +244,16 @@ export async function getListingsRestrictions(input: {
  * membership alone never means that the seller can list the item.
  */
 export async function searchCatalogItems(input: {
-  query: string;
+  query?: string;
+  identifiers?: string[];
   refreshToken: string;
   accessToken?: string;
   marketplaceId?: string;
   limit?: number;
   identifierType?: CatalogIdentifierType;
 }) {
-  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
   const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
-  const url = new URL("/catalog/2022-04-01/items", endpoint);
-
-  url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
-  url.searchParams.set("includedData", "summaries,identifiers,images");
-  url.searchParams.set("locale", "en_US");
-  url.searchParams.set("pageSize", String(Math.max(1, Math.min(input.limit ?? 10, 20))));
-
-  if (input.identifierType) {
-    url.searchParams.set("identifiers", input.query);
-    url.searchParams.set("identifiersType", input.identifierType);
-  } else {
-    url.searchParams.set("keywords", input.query);
-  }
+  const url = buildAmazonCatalogSearchUrl(input);
 
   const response = await fetch(url, {
     headers: {
@@ -283,6 +271,45 @@ export async function searchCatalogItems(input: {
   }
 
   return parsedBody as CatalogSearchResponse;
+}
+
+export function buildAmazonCatalogSearchUrl(input: {
+  query?: string;
+  identifiers?: string[];
+  marketplaceId?: string;
+  limit?: number;
+  identifierType?: CatalogIdentifierType;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const url = new URL("/catalog/2022-04-01/items", endpoint);
+  const query = input.query?.trim();
+  const identifiers = Array.from(new Set((input.identifiers ?? [])
+    .map((value) => value.trim())
+    .filter(Boolean))).slice(0, 20);
+
+  url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+  url.searchParams.set("includedData", "summaries,identifiers,images");
+  url.searchParams.set("locale", "en_US");
+  url.searchParams.set("pageSize", String(Math.max(1, Math.min(input.limit ?? 10, 20))));
+
+  if (input.identifierType) {
+    const values = identifiers.length > 0 ? identifiers : query ? [query] : [];
+
+    if (!values.length) {
+      throw new Error("At least one catalog identifier is required.");
+    }
+
+    url.searchParams.set("identifiers", values.join(","));
+    url.searchParams.set("identifiersType", input.identifierType);
+  } else {
+    if (!query) {
+      throw new Error("A catalog keyword query is required.");
+    }
+
+    url.searchParams.set("keywords", query);
+  }
+
+  return url;
 }
 
 /** Return the seller's own listings. The SKU is required before a price can be changed. */

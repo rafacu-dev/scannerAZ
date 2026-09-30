@@ -7,7 +7,9 @@ import { getAmazonConnectionForTenant } from "../storage/connections.js";
 import {
   AmazonOrdersRequestError,
   getLwaAccessToken,
+  normalizeCatalogSearchResponse,
   normalizeAmazonOrderSearch,
+  searchCatalogItems,
   searchSellerOrders
 } from "../amazon/spapi.js";
 import {
@@ -38,6 +40,7 @@ import {
   recordAmazonCustomerReturn,
   recordInventorySale,
   recordRetailerReturn,
+  resolveInventoryAsinMappings,
   resolveInventoryReturn,
   saveInvoiceExtraction,
   type InventoryCondition
@@ -78,6 +81,19 @@ const amazonSalesSyncRateLimit = rateLimit({
   }
 });
 
+// Catalog lookups happen while reviewing a receipt. Keep the batch endpoint
+// bounded so a malformed invoice cannot fan out into an unbounded SP-API job.
+const invoiceAsinResolutionRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 12,
+  legacyHeaders: false,
+  standardHeaders: true,
+  keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
+  handler: (_req, res) => {
+    res.status(429).json({ error: "Espera un momento antes de volver a vincular UPCs con Amazon." });
+  }
+});
+
 const conditionSchema = z.enum([
   "new",
   "used_like_new",
@@ -112,6 +128,11 @@ const invoiceSchema = z.object({
     upc: optionalReference,
     imageUrl: z.string().url().max(2000).optional()
   })).min(1).max(100)
+});
+
+const asinMappingResolutionSchema = z.object({
+  connectionId: z.string().trim().min(1).max(200).optional(),
+  upcs: z.array(z.string().trim().min(1).max(64)).min(1).max(100)
 });
 
 const saleSchema = z.object({
@@ -154,6 +175,108 @@ inventoryRouter.get("/overview", async (req, res, next) => {
   try {
     res.json(await getInventoryOverview(requireTenantId(req)));
   } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.post("/asin-mappings/resolve", invoiceAsinResolutionRateLimit, async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const input = asinMappingResolutionSchema.parse(req.body);
+    const upcs = Array.from(new Set(input.upcs
+      .map(normalizeInvoiceUpc)
+      .filter((value): value is string => Boolean(value))));
+
+    if (!upcs.length) {
+      res.status(400).json({ error: "Incluye al menos un UPC valido de 8 a 14 digitos." });
+      return;
+    }
+
+    const savedMappings = await resolveInventoryAsinMappings(tenantId, upcs);
+    const savedByUpc = new Map(savedMappings.map((mapping) => [mapping.upc, mapping]));
+    const unresolvedUpcs = upcs.filter((upc) => !savedByUpc.has(upc));
+    const catalogCandidates = new Map<string, Map<string, {
+      asin: string;
+      title?: string;
+      imageUrl?: string;
+    }>>();
+    let connectionAvailable = false;
+
+    if (unresolvedUpcs.length > 0 && input.connectionId) {
+      const connection = await getAmazonConnectionForTenant(input.connectionId, tenantId);
+
+      if (!connection) {
+        res.status(404).json({ error: "No encontramos esa conexion de Amazon." });
+        return;
+      }
+
+      assertAmazonSpApiConfig(connection.refreshToken);
+      connectionAvailable = true;
+      const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+      const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+
+      for (const identifiers of chunkValues(unresolvedUpcs, 20)) {
+        const response = await searchCatalogItems({
+          identifiers,
+          identifierType: "UPC",
+          refreshToken: connection.refreshToken,
+          accessToken,
+          marketplaceId,
+          limit: 20
+        });
+
+        for (const candidate of normalizeCatalogSearchResponse(response, marketplaceId)) {
+          for (const identifier of candidate.identifiers) {
+            if (identifier.type.toUpperCase() !== "UPC") {
+              continue;
+            }
+
+            const upc = normalizeInvoiceUpc(identifier.value);
+
+            if (!upc || !unresolvedUpcs.includes(upc)) {
+              continue;
+            }
+
+            const candidatesForUpc = catalogCandidates.get(upc) ?? new Map();
+            candidatesForUpc.set(candidate.asin, {
+              asin: candidate.asin,
+              title: candidate.title,
+              imageUrl: candidate.imageUrl
+            });
+            catalogCandidates.set(upc, candidatesForUpc);
+          }
+        }
+      }
+    }
+
+    res.json({
+      connectionAvailable,
+      results: upcs.map((upc) => {
+        const saved = savedByUpc.get(upc);
+
+        if (saved) {
+          return saved;
+        }
+
+        const candidates = Array.from(catalogCandidates.get(upc)?.values() ?? []);
+
+        if (candidates.length === 1) {
+          return { upc, ...candidates[0], source: "amazon_catalog" as const };
+        }
+
+        if (candidates.length > 1) {
+          return { upc, source: "ambiguous" as const, candidates };
+        }
+
+        return { upc, source: "unresolved" as const };
+      })
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: "Los UPCs enviados para vincular no son validos." });
+      return;
+    }
+
     next(error);
   }
 });
@@ -390,6 +513,21 @@ inventoryRouter.post("/returns/:returnId/resolve", async (req, res, next) => {
     respondToInventoryError(error, res, next);
   }
 });
+
+function normalizeInvoiceUpc(value: string) {
+  const digits = value.replace(/[^0-9]/g, "");
+  return /^\d{8,14}$/.test(digits) ? digits : undefined;
+}
+
+function chunkValues<T>(values: T[], size: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+
+  return chunks;
+}
 
 function requireTenantId(req: express.Request) {
   const tenantId = req.scannerazTenantSession?.tenantId;

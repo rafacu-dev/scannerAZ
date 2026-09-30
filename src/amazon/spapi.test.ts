@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildAmazonCatalogSearchUrl,
   buildAmazonOrdersSearchUrl,
   getSpApiEndpoint,
   inferCatalogIdentifierType,
@@ -38,6 +39,21 @@ test("keeps the original filters when continuing an Amazon Orders page", () => {
   assert.equal(url.searchParams.get("maxResultsPerPage"), "100");
   assert.equal(url.searchParams.get("includedData"), "FULFILLMENT");
   assert.equal(url.searchParams.get("paginationToken"), "next-page-token");
+});
+
+test("builds one exact UPC catalog lookup for a receipt batch", () => {
+  const url = buildAmazonCatalogSearchUrl({
+    identifiers: ["012345678905", "123456789012"],
+    identifierType: "UPC",
+    marketplaceId: "ATVPDKIKX0DER",
+    limit: 20
+  });
+
+  assert.equal(url.pathname, "/catalog/2022-04-01/items");
+  assert.equal(url.searchParams.get("marketplaceIds"), "ATVPDKIKX0DER");
+  assert.equal(url.searchParams.get("identifiers"), "012345678905,123456789012");
+  assert.equal(url.searchParams.get("identifiersType"), "UPC");
+  assert.equal(url.searchParams.get("includedData"), "summaries,identifiers,images");
 });
 
 test("infers catalog identifier types without treating product names as identifiers", () => {

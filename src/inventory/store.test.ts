@@ -22,3 +22,13 @@ test("falls back to a normalized title when an invoice line has no product code"
     "title:example product"
   );
 });
+
+test("normalizes UPC separators before using the receipt line as an inventory key", () => {
+  assert.equal(
+    inventoryProductKey({
+      title: "Example product",
+      upc: "012-345-678-905"
+    }),
+    "upc:012345678905"
+  );
+});
