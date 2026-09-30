@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { config } from "../config.js";
-import type { ExtractedInvoiceDraft } from "./extraction.js";
+import { normalizeExtractedInvoiceDraft, type ExtractedInvoiceDraft } from "./extraction.js";
 
 export type InventoryCondition =
   | "new"
@@ -2352,7 +2352,7 @@ function toStoredInvoiceExtraction(row: InvoiceExtractionRow): StoredInvoiceExtr
     documentSha256: row.document_sha256,
     model: row.model,
     status: row.status,
-    draft,
+    draft: normalizeExtractedInvoiceDraft(draft),
     createdAt: new Date(row.created_at).toISOString(),
     confirmedAt: row.confirmed_at ? new Date(row.confirmed_at).toISOString() : undefined,
     invoiceId: row.invoice_id ?? undefined

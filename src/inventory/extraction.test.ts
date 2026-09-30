@@ -4,7 +4,8 @@ import {
   buildInvoiceExtractionGatewayRequest,
   detectInvoiceMimeType,
   invoiceDocumentSha256,
-  isSupportedInvoiceMimeType
+  isSupportedInvoiceMimeType,
+  normalizeExtractedInvoiceDraft
 } from "./extraction.js";
 
 test("recognizes the invoice document formats accepted by the extractor", () => {
@@ -42,4 +43,28 @@ test("builds a bounded Warasoft Responses request for a reviewable invoice draft
   assert.match(String(request.input[1]?.content[0]?.image_url), /^data:image\/jpeg;base64,/);
   assert.equal(request.text.format.type, "json_schema");
   assert.equal(request.text.format.strict, true);
+});
+
+test("moves a retail UPC out of a generic numeric SKU field", () => {
+  const draft = normalizeExtractedInvoiceDraft({
+    lines: [{
+      title: "ELECSKILLET",
+      quantity: 1,
+      sku: "082948619534",
+      unitCostCents: 5900
+    }],
+    warnings: []
+  });
+
+  assert.deepEqual(draft.lines[0], {
+    title: "ELECSKILLET",
+    quantity: 1,
+    upc: "082948619534",
+    unitCostCents: 5900,
+    lineTotalCents: undefined,
+    taxCents: undefined,
+    discountCents: undefined,
+    sku: undefined,
+    asin: undefined
+  });
 });

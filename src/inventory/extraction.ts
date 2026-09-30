@@ -193,6 +193,7 @@ export function buildInvoiceExtractionGatewayRequest(input: InvoiceDocumentInput
             "Only extract information visibly present in the document. Never invent a supplier, invoice number, UPC, ASIN, SKU, date, price, tax, discount, or totals.",
             "Use null for a scalar not visibly present. Use an empty lines array when no product line can be read reliably.",
             "All monetary amounts must be integer minor units (for USD, cents). Report discounts as positive amounts. Keep the exact product text where possible.",
+            "For a retail receipt, an all-numeric product code of 8 to 14 digits is a UPC/GTIN: put it in upc, not sku. If there is no formal invoice number, use the most specific visible receipt or transaction reference, such as a transaction number or TC#, as invoiceNumber.",
             "Invoice date must be YYYY-MM-DD when visible. Invoice time is optional and must preserve the text seen.",
             "Add concise Spanish warnings for unreadable, ambiguous, inferred, or unreconciled information."
           ].join(" ")
@@ -347,7 +348,7 @@ export async function extractInvoiceDocument(input: InvoiceDocumentInput): Promi
 }
 
 function normalizeExtractedDraft(input: z.infer<typeof extractedInvoiceSchema>): ExtractedInvoiceDraft {
-  return {
+  return normalizeExtractedInvoiceDraft({
     supplier: optionalText(input.supplier),
     invoiceNumber: optionalText(input.invoiceNumber),
     invoiceDate: input.invoiceDate ?? undefined,
@@ -370,12 +371,56 @@ function normalizeExtractedDraft(input: z.infer<typeof extractedInvoiceSchema>):
       taxCents: line.taxCents ?? undefined,
       discountCents: line.discountCents ?? undefined
     })),
+    warnings: input.warnings
+  });
+}
+
+/**
+ * Retail receipts commonly label a UPC as a generic SKU. Normalize that
+ * recoverable ambiguity before the invoice reaches the UPC-to-ASIN workflow.
+ * The same function is also used when reading older saved extraction drafts.
+ */
+export function normalizeExtractedInvoiceDraft(input: ExtractedInvoiceDraft): ExtractedInvoiceDraft {
+  return {
+    supplier: optionalText(input.supplier),
+    invoiceNumber: optionalText(input.invoiceNumber),
+    invoiceDate: input.invoiceDate,
+    invoiceTime: optionalText(input.invoiceTime),
+    currency: optionalText(input.currency),
+    subtotalCents: input.subtotalCents,
+    taxCents: input.taxCents,
+    discountCents: input.discountCents,
+    shippingCents: input.shippingCents,
+    otherChargesCents: input.otherChargesCents,
+    totalCents: input.totalCents,
+    lines: input.lines.map((line) => {
+      const sku = optionalText(line.sku);
+      const explicitUpc = normalizeReceiptUpc(line.upc);
+      const skuUpc = explicitUpc ? undefined : normalizeReceiptUpc(sku);
+
+      return {
+        title: line.title.trim(),
+        quantity: line.quantity,
+        sku: skuUpc ? undefined : sku,
+        upc: explicitUpc ?? skuUpc ?? optionalText(line.upc),
+        asin: optionalText(line.asin),
+        unitCostCents: line.unitCostCents,
+        lineTotalCents: line.lineTotalCents,
+        taxCents: line.taxCents,
+        discountCents: line.discountCents
+      };
+    }),
     warnings: [...new Set(input.warnings.map((warning) => warning.trim()).filter(Boolean))]
   };
 }
 
-function optionalText(value: string | null) {
+function optionalText(value?: string | null) {
   return value?.trim() || undefined;
+}
+
+function normalizeReceiptUpc(value?: string) {
+  const digits = optionalText(value)?.replace(/[^0-9]/g, "");
+  return digits && /^\d{8,14}$/.test(digits) ? digits : undefined;
 }
 
 async function readJsonResponse(response: Response) {
