@@ -57,8 +57,11 @@ export class InvoiceExtractionDocumentError extends Error {
 }
 
 export class InvoiceExtractionProviderError extends Error {
-  constructor() {
-    super("No pude extraer esta factura ahora. Revisa la imagen o intenta nuevamente.");
+  constructor(
+    readonly statusCode: 429 | 502 | 503 = 502,
+    message = "No pude extraer esta factura ahora. Revisa la imagen o intenta nuevamente."
+  ) {
+    super(message);
   }
 }
 
@@ -373,15 +376,15 @@ export async function extractInvoiceDocument(input: InvoiceDocumentInput): Promi
     response = await requestInvoiceGateway(
       buildInvoiceExtractionGatewayRequest(input, config.WARASOFT_AI_INVOICE_MODEL)
     );
-  } catch {
-    throw new InvoiceExtractionProviderError();
+  } catch (error) {
+    throw gatewayNetworkError(error);
+  }
+
+  if (!response.ok) {
+    throw gatewayResponseError(response);
   }
 
   const payload = await readJsonResponse(response);
-
-  if (!response.ok) {
-    throw new InvoiceExtractionProviderError();
-  }
 
   const outputText = readOutputText(payload);
 
@@ -468,6 +471,32 @@ async function requestInvoiceGateway(
     signal: AbortSignal.timeout(timeoutMs),
     body: JSON.stringify(requestBody)
   });
+}
+
+function gatewayResponseError(response: Response) {
+  if (response.status === 413) {
+    return new InvoiceExtractionDocumentError("La foto de la factura es demasiado grande. Toma otra foto mas cerca y vuelve a intentarlo.");
+  }
+
+  if (response.status === 429) {
+    return new InvoiceExtractionProviderError(429, "El lector de facturas esta ocupado. Espera un momento e intenta nuevamente.");
+  }
+
+  if (response.status === 503) {
+    return new InvoiceExtractionProviderError(503, "El lector de facturas esta temporalmente no disponible. Intenta nuevamente en unos segundos.");
+  }
+
+  return new InvoiceExtractionProviderError();
+}
+
+function gatewayNetworkError(error: unknown) {
+  const errorName = error instanceof Error ? error.name : "";
+
+  if (errorName === "AbortError" || errorName === "TimeoutError") {
+    return new InvoiceExtractionProviderError(503, "La lectura de la factura tardo demasiado. Prueba una foto mas cerca y vuelve a intentarlo.");
+  }
+
+  return new InvoiceExtractionProviderError(503, "No pude comunicarme con el lector de facturas. Intenta nuevamente en unos segundos.");
 }
 
 function normalizeExtractedDraft(input: z.infer<typeof extractedInvoiceSchema>): ExtractedInvoiceDraft {

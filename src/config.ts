@@ -43,7 +43,7 @@ const envSchema = z.object({
   WARASOFT_AI_GATEWAY_KEY: z.string().min(1).optional(),
   WARASOFT_AI_INVOICE_MODEL: z.string().trim().min(1).default("gpt-4o-mini"),
   WARASOFT_AI_PROJECT: z.coerce.number().int().positive().optional(),
-  INVOICE_EXTRACTION_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(120_000).default(90_000),
+  INVOICE_EXTRACTION_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(120_000).default(115_000),
   INVOICE_EXTRACTION_MAX_FILE_BYTES: z.coerce.number().int().min(1_000_000).max(50_000_000).default(20_000_000),
   TARGET_PROVIDER: z.enum(["public-web", "unwrangle"]).default("public-web"),
   TARGET_API_KEY: z.string().min(1).optional(),

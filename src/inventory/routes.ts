@@ -576,7 +576,7 @@ function respondToInventoryError(
   }
 
   if (error instanceof InvoiceExtractionProviderError) {
-    res.status(502).json({ error: error.message });
+    res.status(error.statusCode).json({ error: error.message });
     return;
   }
 
