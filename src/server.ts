@@ -119,6 +119,13 @@ const publicTenantRateLimit = rateLimit({
   limit: 30,
   legacyHeaders: false,
   standardHeaders: true,
+  // Invoice extraction has its own authenticated upload path and is not a
+  // polling action. Do not turn normal inventory intake into a quota.
+  skip: (req) => (
+    req.baseUrl === "/api/public/inventory" &&
+    req.method === "POST" &&
+    req.path === "/invoice-extractions"
+  ),
   keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
   handler: (req, res) => {
     recordSecurityEvent("security.rate_limited", req, res, { scope: "tenant_amazon" });
