@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildAmazonOrdersSearchUrl,
   getSpApiEndpoint,
   inferCatalogIdentifierType,
   normalizeCatalogSearchResponse,
@@ -21,6 +22,22 @@ test("uses the regional production endpoint when requested", () => {
     getSpApiEndpoint("eu", "production"),
     "https://sellingpartnerapi-eu.amazon.com"
   );
+});
+
+test("keeps the original filters when continuing an Amazon Orders page", () => {
+  const url = buildAmazonOrdersSearchUrl({
+    marketplaceId: "ATVPDKIKX0DER",
+    lastUpdatedAfter: "2026-09-01T00:00:00.000Z",
+    paginationToken: "next-page-token",
+    maxResultsPerPage: 100
+  });
+
+  assert.equal(url.pathname, "/orders/2026-01-01/orders");
+  assert.equal(url.searchParams.get("marketplaceIds"), "ATVPDKIKX0DER");
+  assert.equal(url.searchParams.get("lastUpdatedAfter"), "2026-09-01T00:00:00.000Z");
+  assert.equal(url.searchParams.get("maxResultsPerPage"), "100");
+  assert.equal(url.searchParams.get("includedData"), "FULFILLMENT");
+  assert.equal(url.searchParams.get("paginationToken"), "next-page-token");
 });
 
 test("infers catalog identifier types without treating product names as identifiers", () => {

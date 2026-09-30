@@ -153,6 +153,33 @@ export type PreparedListingPriceUpdate = {
 
 export type RestrictionStatus = "sellable" | "approval_required" | "blocked" | "unknown";
 
+export function buildAmazonOrdersSearchUrl(input: {
+  marketplaceId?: string;
+  lastUpdatedAfter?: string;
+  paginationToken?: string;
+  maxResultsPerPage?: number;
+}) {
+  if (!input.lastUpdatedAfter) {
+    throw new Error("lastUpdatedAfter is required for every Amazon Orders request.");
+  }
+
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const url = new URL("/orders/2026-01-01/orders", endpoint);
+
+  // searchOrders validates that every filter matches the original request
+  // when a pagination token is present.
+  url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+  url.searchParams.set("lastUpdatedAfter", input.lastUpdatedAfter);
+  url.searchParams.set("maxResultsPerPage", String(Math.max(1, Math.min(input.maxResultsPerPage ?? 100, 100))));
+  url.searchParams.set("includedData", "FULFILLMENT");
+
+  if (input.paginationToken) {
+    url.searchParams.set("paginationToken", input.paginationToken);
+  }
+
+  return url;
+}
+
 export async function getLwaAccessToken(refreshToken: string) {
   const response = await fetch("https://api.amazon.com/auth/o2/token", {
     method: "POST",
@@ -319,22 +346,8 @@ export async function searchSellerOrders(input: {
   paginationToken?: string;
   maxResultsPerPage?: number;
 }) {
-  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
   const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
-  const url = new URL("/orders/2026-01-01/orders", endpoint);
-
-  if (input.paginationToken) {
-    url.searchParams.set("paginationToken", input.paginationToken);
-  } else {
-    if (!input.lastUpdatedAfter) {
-      throw new Error("lastUpdatedAfter is required when no Amazon Orders pagination token is supplied.");
-    }
-
-    url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
-    url.searchParams.set("lastUpdatedAfter", input.lastUpdatedAfter);
-    url.searchParams.set("maxResultsPerPage", String(Math.max(1, Math.min(input.maxResultsPerPage ?? 100, 100))));
-    url.searchParams.set("includedData", "FULFILLMENT");
-  }
+  const url = buildAmazonOrdersSearchUrl(input);
 
   const response = await fetch(url, {
     headers: {

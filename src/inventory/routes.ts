@@ -223,7 +223,7 @@ inventoryRouter.post("/amazon-sales/:connectionId/sync", amazonSalesSyncRateLimi
         refreshToken: connection.refreshToken,
         accessToken,
         marketplaceId: connection.marketplaceId || config.AMAZON_MARKETPLACE_ID,
-        lastUpdatedAfter: paginationToken ? undefined : work.lastUpdatedAfter,
+        lastUpdatedAfter: work.lastUpdatedAfter,
         paginationToken,
         maxResultsPerPage: 100
       });
