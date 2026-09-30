@@ -39,8 +39,8 @@ which preserves the extracted invoice-wide amounts and time for audit.
 receives it, and ScannerAz never receives the upstream provider credential.
 `WARASOFT_AI_GATEWAY_URL` points to Warasoft's bounded Responses endpoint;
 `WARASOFT_AI_INVOICE_MODEL` defaults to `gpt-4o-mini`. The gateway requires an
-explicit model allowlist, rate, daily-token, and monthly-budget limits, while
-ScannerAz also rate-limits analysis per tenant to control accidental repeats.
+explicit model allowlist and can apply operational throughput controls, but
+ScannerAz does not impose a per-tenant invoice-analysis quota.
 
 To retain original PDFs/photos for audit or accounting, add private object
 storage (for example R2/S3) with tenant-scoped signed uploads and short-lived

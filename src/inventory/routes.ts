@@ -58,17 +58,6 @@ const invoiceUpload = multer({
   }
 });
 
-const invoiceExtractionRateLimit = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  limit: 6,
-  legacyHeaders: false,
-  standardHeaders: true,
-  keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
-  handler: (_req, res) => {
-    res.status(429).json({ error: "Has alcanzado el limite temporal de analisis de facturas." });
-  }
-});
-
 // searchOrders has a conservative default usage plan. A tenant can continue a
 // paginated sync, but cannot turn the action into a rapid polling loop.
 const amazonSalesSyncRateLimit = rateLimit({
@@ -420,7 +409,7 @@ inventoryRouter.post("/invoices", async (req, res, next) => {
   }
 });
 
-inventoryRouter.post("/invoice-extractions", invoiceExtractionRateLimit, async (req, res, next) => {
+inventoryRouter.post("/invoice-extractions", async (req, res, next) => {
   let file: Express.Multer.File | undefined;
 
   try {
