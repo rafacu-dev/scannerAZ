@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyAmazonSellerStoreName,
   buildAmazonItemOffersBatchRequest,
   buildAmazonCatalogSearchUrl,
   buildAmazonOrdersSearchUrl,
@@ -281,6 +282,30 @@ test("normalizes current Product Pricing offers and the Featured Offer", () => {
       }
     ]
   });
+});
+
+test("adds the verified storefront name only to the authorized seller", () => {
+  const details = normalizeAmazonItemOffers({
+    asin: "B0GSDRQN6L",
+    featuredBuyingOptions: [{
+      segmentedFeaturedOffers: [{
+        sellerId: "A-OWN",
+        fulfillmentType: "MFN",
+        listingPrice: { amount: 89.99, currencyCode: "USD" },
+      }],
+    }],
+    lowestPricedOffers: [{
+      offers: [
+        { sellerId: "A-OWN", fulfillmentType: "MFN", listingPrice: { amount: 89.99, currencyCode: "USD" } },
+        { sellerId: "A-OTHER", fulfillmentType: "AFN", listingPrice: { amount: 90, currencyCode: "USD" } },
+      ],
+    }],
+  }, "B0GSDRQN6L");
+  const named = applyAmazonSellerStoreName(details, "A-OWN", "Wara Shop US");
+
+  assert.equal(named.buyBoxSellerName, "Wara Shop US");
+  assert.equal(named.offers.find((offer) => offer.sellerId === "A-OWN")?.sellerName, "Wara Shop US");
+  assert.equal(named.offers.find((offer) => offer.sellerId === "A-OTHER")?.sellerName, undefined);
 });
 
 test("keeps successful Product Pricing batch results when another ASIN fails", () => {

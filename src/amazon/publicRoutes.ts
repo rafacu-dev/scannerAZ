@@ -6,7 +6,9 @@ import {
   listAmazonConnectionsForTenant
 } from "../storage/connections.js";
 import {
+  applyAmazonSellerStoreName,
   getAmazonItemOffersBatch,
+  getAmazonSellerStoreName,
   getListingsRestrictions,
   getSellerListingItem,
   getLwaAccessToken,
@@ -42,6 +44,9 @@ type PriceUpdateResult = {
 
 const itemOffersCache = new Map<string, { expiresAt: number; value: ReturnType<typeof normalizeAmazonItemOffers> }>();
 const itemOffersCacheTtlMs = 90_000;
+const sellerStoreNameCache = new Map<string, { expiresAt: number; value?: string }>();
+const sellerStoreNameCacheTtlMs = 6 * 60 * 60 * 1000;
+const sellerStoreNameFailureCacheTtlMs = 5 * 60 * 1000;
 let nextItemOffersBatchStartAt = 0;
 
 publicAmazonRouter.get("/connections", async (req, res, next) => {
@@ -293,14 +298,26 @@ publicAmazonRouter.get("/connections/:connectionId/items/:asin/offers", async (r
     assertAmazonSpApiConfig(connection.refreshToken);
     const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
     const cacheKey = itemOffersCacheKey(tenantId, connectionId, marketplaceId, asin);
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    const sellerStoreName = await getCachedAmazonSellerStoreName({
+      connectionId,
+      sellerId: connection.sellerId,
+      refreshToken: connection.refreshToken,
+      accessToken,
+      marketplaceId,
+    });
     const cached = getCachedItemOffers(cacheKey);
 
     if (cached) {
-      res.json({ connectionId, marketplaceId, cached: true, offers: cached });
+      res.json({
+        connectionId,
+        marketplaceId,
+        cached: true,
+        offers: applyAmazonSellerStoreName(cached, connection.sellerId, sellerStoreName),
+      });
       return;
     }
 
-    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
     const response = await withItemOffersBatchSlot(() => getAmazonItemOffersBatch({
       asins: [asin],
       refreshToken: connection.refreshToken,
@@ -313,7 +330,12 @@ publicAmazonRouter.get("/connections/:connectionId/items/:asin/offers", async (r
       cacheItemOffers(cacheKey, offers);
     }
 
-    res.json({ connectionId, marketplaceId, cached: false, offers });
+    res.json({
+      connectionId,
+      marketplaceId,
+      cached: false,
+      offers: applyAmazonSellerStoreName(offers, connection.sellerId, sellerStoreName),
+    });
   } catch (error) {
     next(error);
   }
@@ -688,6 +710,47 @@ function cacheItemOffers(cacheKey: string, value: ReturnType<typeof normalizeAma
     value,
     expiresAt: Date.now() + itemOffersCacheTtlMs
   });
+}
+
+async function getCachedAmazonSellerStoreName(input: {
+  connectionId: string;
+  sellerId?: string;
+  refreshToken: string;
+  accessToken: string;
+  marketplaceId: string;
+}) {
+  if (!input.sellerId) {
+    return undefined;
+  }
+
+  const cacheKey = `${input.connectionId}:${input.marketplaceId}`;
+  const cached = sellerStoreNameCache.get(cacheKey);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  try {
+    const value = await getAmazonSellerStoreName({
+      refreshToken: input.refreshToken,
+      accessToken: input.accessToken,
+      marketplaceId: input.marketplaceId,
+    });
+
+    sellerStoreNameCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + sellerStoreNameCacheTtlMs,
+    });
+
+    return value;
+  } catch {
+    // Product Pricing remains useful even when the optional Sellers role is
+    // unavailable. Retry the storefront-name lookup after a short delay.
+    sellerStoreNameCache.set(cacheKey, {
+      expiresAt: Date.now() + sellerStoreNameFailureCacheTtlMs,
+    });
+    return undefined;
+  }
 }
 
 async function withItemOffersBatchSlot<T>(request: () => Promise<T>) {

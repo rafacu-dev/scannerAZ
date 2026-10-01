@@ -94,6 +94,7 @@ export type AmazonPricingListing = {
  */
 export type AmazonItemOffer = {
   sellerId?: string;
+  sellerName?: string;
   fulfillment: "FBA" | "FBM" | "AMZ" | "Unknown";
   condition?: string;
   listingPrice?: number;
@@ -113,6 +114,7 @@ export type AmazonItemOffers = {
   amazonOfferCount: number;
   buyBoxAvailable: boolean;
   buyBoxSellerId?: string;
+  buyBoxSellerName?: string;
   buyBoxPrice?: number;
   currency?: string;
   offers: AmazonItemOffer[];
@@ -423,6 +425,50 @@ export async function getAmazonItemOffersBatch(input: {
   return parsedBody;
 }
 
+/**
+ * Sellers API only identifies the authorized seller's own storefront. It is
+ * deliberately not used to infer names for competing Seller IDs.
+ */
+export async function getAmazonSellerStoreName(input: {
+  refreshToken: string;
+  accessToken?: string;
+  marketplaceId?: string;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL("/sellers/v1/marketplaceParticipations", endpoint);
+  const response = await fetch(url, {
+    headers: spApiReadHeaders(accessToken)
+  });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Sellers", response.status, parsedBody, "Selling Partner Insights"));
+  }
+
+  return normalizeAmazonSellerStoreName(parsedBody, input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+}
+
+function normalizeAmazonSellerStoreName(response: unknown, marketplaceId: string) {
+  const root = asRecord(response);
+  const payload = recordValue(root, ["payload", "marketplaceParticipations"]);
+  const payloadRecord = asRecord(payload);
+  const participations = [
+    ...recordArray(payload),
+    ...recordArray(recordValue(payloadRecord, ["marketplaceParticipations", "participations"])),
+  ];
+  const entry = participations.find((participation) => {
+    const marketplace = asRecord(recordValue(participation, ["marketplace", "Marketplace"]));
+    return stringValue(recordValue(participation, ["marketplaceId", "MarketplaceId"])) === marketplaceId ||
+      stringValue(recordValue(marketplace, ["id", "marketplaceId", "MarketplaceId"])) === marketplaceId;
+  }) ?? (participations.length === 1 ? participations[0] : undefined);
+  const marketplace = asRecord(recordValue(entry, ["marketplace", "Marketplace"]));
+
+  return stringValue(recordValue(entry, ["storeName", "StoreName", "sellerStoreName", "SellerStoreName"])) ??
+    stringValue(recordValue(marketplace, ["storeName", "StoreName"]));
+}
+
 export function buildAmazonItemOffersBatchRequest(input: {
   asins: string[];
   marketplaceId?: string;
@@ -493,6 +539,7 @@ export function normalizeAmazonItemOffers(
     amazonOfferCount: visibleFulfillmentCounts.amz,
     buyBoxAvailable: Boolean(winningOffer),
     ...(winningOffer?.sellerId ? { buyBoxSellerId: winningOffer.sellerId } : {}),
+    ...(winningOffer?.sellerName ? { buyBoxSellerName: winningOffer.sellerName } : {}),
     ...(buyBoxPrice !== undefined ? { buyBoxPrice } : {}),
     ...(currency ? { currency } : {}),
     offers
@@ -980,6 +1027,7 @@ function fulfillmentFromChannel(value: unknown): "FBA" | "FBM" | undefined {
 
 function normalizeAmazonItemOffer(offer: Record<string, unknown>): AmazonItemOffer {
   const sellerId = stringValue(recordValue(offer, ["SellerId", "sellerId"]));
+  const sellerName = stringValue(recordValue(offer, ["SellerName", "sellerName", "SellerStoreName", "sellerStoreName", "storeName"]));
   const listing = offerMoney(offer, ["ListingPrice", "listingPrice"]);
   const shippingOptions = recordArray(recordValue(offer, ["shippingOptions", "ShippingOptions"]));
   const defaultShipping = shippingOptions.find((option) =>
@@ -1002,6 +1050,7 @@ function normalizeAmazonItemOffer(offer: Record<string, unknown>): AmazonItemOff
 
   return {
     ...(sellerId ? { sellerId } : {}),
+    ...(sellerName ? { sellerName } : {}),
     fulfillment,
     ...(stringValue(recordValue(offer, ["subCondition", "SubCondition", "condition", "Condition"]))
       ? { condition: stringValue(recordValue(offer, ["subCondition", "SubCondition", "condition", "Condition"])) }
@@ -1018,6 +1067,34 @@ function normalizeAmazonItemOffer(offer: Record<string, unknown>): AmazonItemOff
     ...(booleanValue(primeDetails) || Boolean(asRecord(primeDetails))
       ? { isPrime: true }
     : {})
+  };
+}
+
+/** Add a verified display name when it belongs to the authorized seller. */
+export function applyAmazonSellerStoreName(
+  details: AmazonItemOffers,
+  sellerId: string | undefined,
+  sellerName: string | undefined,
+): AmazonItemOffers {
+  const normalizedSellerId = sellerId?.trim().toUpperCase();
+  const normalizedSellerName = sellerName?.trim();
+
+  if (!normalizedSellerId || !normalizedSellerName) {
+    return details;
+  }
+
+  const offers = details.offers.map((offer) =>
+    offer.sellerId?.trim().toUpperCase() === normalizedSellerId && !offer.sellerName
+      ? { ...offer, sellerName: normalizedSellerName }
+      : offer,
+  );
+
+  return {
+    ...details,
+    ...(details.buyBoxSellerId?.trim().toUpperCase() === normalizedSellerId && !details.buyBoxSellerName
+      ? { buyBoxSellerName: normalizedSellerName }
+      : {}),
+    offers,
   };
 }
 
