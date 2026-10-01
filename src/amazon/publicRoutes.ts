@@ -308,7 +308,10 @@ publicAmazonRouter.get("/connections/:connectionId/items/:asin/offers", async (r
       marketplaceId
     }));
     const offers = normalizeAmazonItemOffersBatch(response, [asin])[0] ?? emptyItemOffersResult(asin);
-    cacheItemOffers(cacheKey, offers);
+
+    if (!offers.error) {
+      cacheItemOffers(cacheKey, offers);
+    }
 
     res.json({ connectionId, marketplaceId, cached: false, offers });
   } catch (error) {
