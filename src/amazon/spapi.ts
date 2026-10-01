@@ -88,6 +88,38 @@ export type AmazonPricingListing = {
 };
 
 /**
+ * Product Pricing v2022 returns up to 20 lowest-priced offers for an ASIN,
+ * plus the featured offers. It does not claim to enumerate every seller in
+ * the marketplace.
+ */
+export type AmazonItemOffer = {
+  sellerId?: string;
+  fulfillment: "FBA" | "FBM" | "AMZ" | "Unknown";
+  condition?: string;
+  listingPrice?: number;
+  shippingPrice?: number;
+  landedPrice?: number;
+  currency?: string;
+  isBuyBoxWinner?: boolean;
+  isPrime?: boolean;
+};
+
+export type AmazonItemOffers = {
+  asin: string;
+  visibleOfferCount: number;
+  sellerCount: number;
+  fbaOfferCount: number;
+  fbmOfferCount: number;
+  amazonOfferCount: number;
+  buyBoxAvailable: boolean;
+  buyBoxSellerId?: string;
+  buyBoxPrice?: number;
+  currency?: string;
+  offers: AmazonItemOffer[];
+  error?: string;
+};
+
+/**
  * Operational order data needed to reconcile a seller's own inventory. This
  * deliberately excludes buyer, address, payment, tax, package, and tracking
  * fields. It is normalized from Orders API v2026-01-01 responses.
@@ -358,6 +390,144 @@ export async function searchSellerListings(input: {
   }
 
   return parsedBody as SellerListingsSearchResponse;
+}
+
+/**
+ * Product Pricing v2022-05-01 returns the competitive summary for up to 20
+ * ASINs. It includes the featured offers and up to 20 lowest-priced offers,
+ * without requesting the customer-facing Amazon page.
+ */
+export async function getAmazonItemOffersBatch(input: {
+  asins: string[];
+  refreshToken: string;
+  accessToken?: string;
+  marketplaceId?: string;
+}) {
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const request = buildAmazonItemOffersBatchRequest(input);
+  const response = await fetch(request.url, {
+    method: "POST",
+    headers: {
+      ...spApiReadHeaders(accessToken),
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(request.body)
+  });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Product Pricing batch", response.status, parsedBody, "Pricing and Product Listing"));
+  }
+
+  return parsedBody;
+}
+
+export function buildAmazonItemOffersBatchRequest(input: {
+  asins: string[];
+  marketplaceId?: string;
+  itemCondition?: string;
+}) {
+  const asins = Array.from(new Set(input.asins.map(normalizeAsin))).slice(0, 20);
+
+  if (!asins.length) {
+    throw new Error("At least one ASIN is required for Product Pricing.");
+  }
+
+  const marketplaceId = input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID;
+  const itemCondition = input.itemCondition ?? "New";
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+
+  return {
+    asins,
+    url: new URL("/batches/products/pricing/2022-05-01/items/competitiveSummary", endpoint),
+    body: {
+      requests: asins.map((asin) => ({
+        asin,
+        marketplaceId,
+        includedData: ["featuredBuyingOptions", "lowestPricedOffers"],
+        lowestPricedOffersInputs: [
+          {
+            itemCondition,
+            offerType: "Consumer"
+          }
+        ],
+        uri: "/products/pricing/2022-05-01/items/competitiveSummary",
+        method: "GET",
+      }))
+    }
+  };
+}
+
+/** Normalize Product Pricing v2022's competitive-summary response shape. */
+export function normalizeAmazonItemOffers(
+  response: unknown,
+  asin: string
+): AmazonItemOffers {
+  const normalizedAsin = normalizeAsin(asin);
+  const body = asRecord(response);
+  const lowestOfferGroups = recordArray(recordValue(body, ["lowestPricedOffers"]));
+  const featuredBuyingOptions = recordArray(recordValue(body, ["featuredBuyingOptions"]));
+  const lowestOffers = lowestOfferGroups.flatMap((group) =>
+    recordArray(recordValue(group, ["offers"])),
+  );
+  const featuredOffers = featuredBuyingOptions.flatMap((option) =>
+    recordArray(recordValue(option, ["segmentedFeaturedOffers"])),
+  );
+  const offers = mergeAmazonItemOffers([
+    ...lowestOffers.map((offer) => normalizeAmazonItemOffer(offer)),
+    ...featuredOffers.map((offer) => ({ ...normalizeAmazonItemOffer(offer), isBuyBoxWinner: true })),
+  ]);
+  const winningOffer = offers.find((offer) => offer.isBuyBoxWinner);
+  const buyBoxPrice = winningOffer?.landedPrice ?? winningOffer?.listingPrice;
+  const currency = winningOffer?.currency ?? offers.find((offer) => offer.currency)?.currency;
+  const visibleFulfillmentCounts = countOfferFulfillment(offers);
+  const sellerIds = new Set(offers.map((offer) => offer.sellerId).filter((sellerId): sellerId is string => Boolean(sellerId)));
+
+  return {
+    asin: stringValue(recordValue(body, ["asin", "ASIN"]))?.toUpperCase() ?? normalizedAsin,
+    visibleOfferCount: offers.length,
+    sellerCount: sellerIds.size,
+    fbaOfferCount: visibleFulfillmentCounts.fba,
+    fbmOfferCount: visibleFulfillmentCounts.fbm,
+    amazonOfferCount: visibleFulfillmentCounts.amz,
+    buyBoxAvailable: Boolean(winningOffer),
+    ...(winningOffer?.sellerId ? { buyBoxSellerId: winningOffer.sellerId } : {}),
+    ...(buyBoxPrice !== undefined ? { buyBoxPrice } : {}),
+    ...(currency ? { currency } : {}),
+    offers
+  };
+}
+
+/**
+ * Batch calls can succeed overall while one ASIN fails. Keep each result so
+ * the mobile client can still render the remaining price comparisons.
+ */
+export function normalizeAmazonItemOffersBatch(
+  response: unknown,
+  asins: string[]
+): AmazonItemOffers[] {
+  const normalizedAsins = Array.from(new Set(asins.map(normalizeAsin))).slice(0, 20);
+  const root = asRecord(response);
+  const responses = recordArray(root?.responses);
+
+  return normalizedAsins.map((asin, index) => {
+    const entry = responses.find((candidate) => batchResponseAsin(candidate) === asin) ?? responses[index];
+
+    if (!entry) {
+      return emptyAmazonItemOffers(asin, "Amazon did not return a result for this ASIN.");
+    }
+
+    const status = asRecord(entry.status);
+    const statusCode = numericValue(status?.statusCode) ?? numericValue(entry.statusCode);
+    const body = entry.body ?? entry;
+
+    if (statusCode !== undefined && statusCode >= 300) {
+      return emptyAmazonItemOffers(asin, amazonBatchErrorMessage(body, statusCode));
+    }
+
+    return normalizeAmazonItemOffers(body, asin);
+  });
 }
 
 /**
@@ -721,6 +891,205 @@ function parseJsonBody(body: string) {
   } catch {
     return body;
   }
+}
+
+function spApiReadHeaders(accessToken: string) {
+  return {
+    accept: "application/json",
+    "user-agent": "ScannerAz/0.1.0 (Language=Node.js; Platform=backend)",
+    "x-amz-access-token": accessToken,
+    "x-amz-date": new Date().toISOString().replace(/[:-]|\.\d{3}/g, "")
+  };
+}
+
+function normalizeAsin(value: string) {
+  const asin = value.trim().toUpperCase();
+
+  if (!/^[A-Z0-9]{10}$/.test(asin)) {
+    throw new Error("ASIN must be a 10-character Amazon identifier.");
+  }
+
+  return asin;
+}
+
+function recordValue(record: Record<string, unknown> | undefined, keys: string[]) {
+  for (const key of keys) {
+    if (record?.[key] !== undefined) {
+      return record[key];
+    }
+  }
+
+  return undefined;
+}
+
+function booleanValue(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return value.trim().toLowerCase() === "true";
+  }
+
+  return false;
+}
+
+function pricingMoney(value: unknown) {
+  const record = asRecord(value);
+  const amount = numericValue(recordValue(record, ["Amount", "amount", "Value", "value"]) ?? value);
+
+  if (amount === undefined) {
+    return undefined;
+  }
+
+  return {
+    amount,
+    currency: stringValue(recordValue(record, ["CurrencyCode", "currencyCode", "Currency", "currency"]))
+  };
+}
+
+function offerMoney(offer: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const money = pricingMoney(offer[key]);
+
+    if (money) {
+      return money;
+    }
+  }
+
+  return undefined;
+}
+
+function fulfillmentFromChannel(value: unknown): "FBA" | "FBM" | undefined {
+  const channel = stringValue(value)?.toUpperCase();
+
+  if (!channel) {
+    return undefined;
+  }
+
+  if (["AMAZON", "AFN", "FBA"].includes(channel)) {
+    return "FBA";
+  }
+
+  if (["MERCHANT", "MFN", "FBM"].includes(channel)) {
+    return "FBM";
+  }
+
+  return undefined;
+}
+
+function normalizeAmazonItemOffer(offer: Record<string, unknown>): AmazonItemOffer {
+  const sellerId = stringValue(recordValue(offer, ["SellerId", "sellerId"]));
+  const listing = offerMoney(offer, ["ListingPrice", "listingPrice"]);
+  const shippingOptions = recordArray(recordValue(offer, ["shippingOptions", "ShippingOptions"]));
+  const defaultShipping = shippingOptions.find((option) =>
+    stringValue(recordValue(option, ["shippingOptionType", "ShippingOptionType"]))?.toUpperCase() === "DEFAULT",
+  ) ?? shippingOptions[0];
+  const shipping = pricingMoney(recordValue(defaultShipping, ["price", "Price"])) ??
+    offerMoney(offer, ["Shipping", "shipping"]);
+  const landed = offerMoney(offer, ["LandedPrice", "landedPrice"]);
+  const fulfillment = booleanValue(recordValue(offer, ["IsAmazon", "isAmazon", "IsAmazonSeller", "isAmazonSeller"]))
+    ? "AMZ"
+    : booleanValue(recordValue(offer, ["IsFulfilledByAmazon", "isFulfilledByAmazon"]))
+      ? "FBA"
+      : fulfillmentFromChannel(recordValue(offer, ["fulfillmentType", "FulfillmentType", "FulfillmentChannel", "fulfillmentChannel"])) ?? "FBM";
+  const landedPrice = landed?.amount ?? (
+    listing?.amount !== undefined
+      ? listing.amount + (shipping?.amount ?? 0)
+      : undefined
+  );
+  const primeDetails = recordValue(offer, ["IsPrime", "isPrime", "PrimeInformation", "primeInformation", "primeDetails", "PrimeDetails"]);
+
+  return {
+    ...(sellerId ? { sellerId } : {}),
+    fulfillment,
+    ...(stringValue(recordValue(offer, ["subCondition", "SubCondition", "condition", "Condition"]))
+      ? { condition: stringValue(recordValue(offer, ["subCondition", "SubCondition", "condition", "Condition"])) }
+      : {}),
+    ...(listing?.amount !== undefined ? { listingPrice: listing.amount } : {}),
+    ...(shipping?.amount !== undefined ? { shippingPrice: shipping.amount } : {}),
+    ...(landedPrice !== undefined ? { landedPrice } : {}),
+    ...(landed?.currency || listing?.currency || shipping?.currency
+      ? { currency: landed?.currency ?? listing?.currency ?? shipping?.currency }
+      : {}),
+    ...(booleanValue(recordValue(offer, ["IsBuyBoxWinner", "isBuyBoxWinner", "IsFeaturedMerchant", "isFeaturedMerchant"]))
+      ? { isBuyBoxWinner: true }
+      : {}),
+    ...(booleanValue(primeDetails) || Boolean(asRecord(primeDetails))
+      ? { isPrime: true }
+    : {})
+  };
+}
+
+function mergeAmazonItemOffers(offers: AmazonItemOffer[]) {
+  const byOfferKey = new Map<string, AmazonItemOffer>();
+
+  for (const offer of offers) {
+    const key = [
+      offer.sellerId ?? "unknown",
+      offer.fulfillment,
+      offer.landedPrice ?? offer.listingPrice ?? "price-unknown",
+    ].join(":");
+    const current = byOfferKey.get(key);
+
+    byOfferKey.set(key, current ? {
+      ...current,
+      ...offer,
+      ...(current.isBuyBoxWinner || offer.isBuyBoxWinner ? { isBuyBoxWinner: true } : {}),
+      ...(current.isPrime || offer.isPrime ? { isPrime: true } : {}),
+    } : offer);
+  }
+
+  return Array.from(byOfferKey.values());
+}
+
+function countOfferFulfillment(offers: AmazonItemOffer[]) {
+  return offers.reduce(
+    (counts, offer) => {
+      if (offer.fulfillment === "FBA") {
+        counts.fba += 1;
+      } else if (offer.fulfillment === "FBM") {
+        counts.fbm += 1;
+      } else if (offer.fulfillment === "AMZ") {
+        counts.amz += 1;
+      }
+
+      return counts;
+    },
+    { fba: 0, fbm: 0, amz: 0 }
+  );
+}
+
+function batchResponseAsin(response: Record<string, unknown>) {
+  const request = asRecord(response.request);
+  const body = asRecord(response.body);
+  return stringValue(recordValue(body, ["ASIN", "asin"]))?.toUpperCase() ??
+    stringValue(recordValue(request, ["ASIN", "asin"]))?.toUpperCase();
+}
+
+function amazonBatchErrorMessage(body: unknown, statusCode: number) {
+  const errors = recordArray(asRecord(body)?.errors);
+  const error = errors[0];
+  const detail = [
+    stringValue(error?.code),
+    stringValue(error?.message)
+  ].filter(Boolean).join(": ");
+
+  return detail || `Amazon Product Pricing returned ${statusCode} for this ASIN.`;
+}
+
+function emptyAmazonItemOffers(asin: string, error: string): AmazonItemOffers {
+  return {
+    asin,
+    visibleOfferCount: 0,
+    sellerCount: 0,
+    fbaOfferCount: 0,
+    fbmOfferCount: 0,
+    amazonOfferCount: 0,
+    buyBoxAvailable: false,
+    offers: [],
+    error
+  };
 }
 
 function recordArray(value: unknown) {

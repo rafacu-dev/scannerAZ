@@ -6,10 +6,13 @@ import {
   listAmazonConnectionsForTenant
 } from "../storage/connections.js";
 import {
+  getAmazonItemOffersBatch,
   getListingsRestrictions,
   getSellerListingItem,
   getLwaAccessToken,
   inferCatalogIdentifierType,
+  normalizeAmazonItemOffers,
+  normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
   normalizeListingsRestrictions,
   normalizePricingListings,
@@ -36,6 +39,10 @@ type PriceUpdateResult = {
   submissionId?: string;
   error?: string;
 };
+
+const itemOffersCache = new Map<string, { expiresAt: number; value: ReturnType<typeof normalizeAmazonItemOffers> }>();
+const itemOffersCacheTtlMs = 90_000;
+let nextItemOffersBatchStartAt = 0;
 
 publicAmazonRouter.get("/connections", async (req, res, next) => {
   try {
@@ -254,6 +261,122 @@ publicAmazonRouter.get("/connections/:connectionId/listings/pricing", async (req
       marketplaceId,
       priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED,
       ...normalized
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Load seller offers for one ASIN only when a user opens its details. Product
+ * Pricing v2022 returns competitive offers and Featured Offer context without
+ * loading or parsing the public Amazon retail page.
+ */
+publicAmazonRouter.get("/connections/:connectionId/items/:asin/offers", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const asin = String(req.params.asin ?? "").trim().toUpperCase();
+
+    if (!/^[A-Z0-9]{10}$/.test(asin)) {
+      res.status(400).json({ error: "asin must be a 10-character ASIN" });
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const cacheKey = itemOffersCacheKey(tenantId, connectionId, marketplaceId, asin);
+    const cached = getCachedItemOffers(cacheKey);
+
+    if (cached) {
+      res.json({ connectionId, marketplaceId, cached: true, offers: cached });
+      return;
+    }
+
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    const response = await withItemOffersBatchSlot(() => getAmazonItemOffersBatch({
+      asins: [asin],
+      refreshToken: connection.refreshToken,
+      accessToken,
+      marketplaceId
+    }));
+    const offers = normalizeAmazonItemOffersBatch(response, [asin])[0] ?? emptyItemOffersResult(asin);
+    cacheItemOffers(cacheKey, offers);
+
+    res.json({ connectionId, marketplaceId, cached: false, offers });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Compare the first page of active listings in one official Product Pricing
+ * batch. Amazon permits at most 20 ASINs and gives this operation a low
+ * default rate, so cache results briefly and pace uncached batch calls.
+ */
+publicAmazonRouter.post("/connections/:connectionId/listings/pricing/offers", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const asins = parseAmazonAsins(req.body?.asins);
+
+    if (typeof asins === "string") {
+      res.status(400).json({ error: asins });
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const cachedByAsin = new Map<string, ReturnType<typeof normalizeAmazonItemOffers>>();
+    const missingAsins: string[] = [];
+
+    for (const asin of asins) {
+      const cached = getCachedItemOffers(itemOffersCacheKey(tenantId, connectionId, marketplaceId, asin));
+
+      if (cached) {
+        cachedByAsin.set(asin, cached);
+      } else {
+        missingAsins.push(asin);
+      }
+    }
+
+    if (missingAsins.length) {
+      const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+      const response = await withItemOffersBatchSlot(() => getAmazonItemOffersBatch({
+        asins: missingAsins,
+        refreshToken: connection.refreshToken,
+        accessToken,
+        marketplaceId
+      }));
+      const freshOffers = normalizeAmazonItemOffersBatch(response, missingAsins);
+
+      for (const offers of freshOffers) {
+        if (!offers.error) {
+          cacheItemOffers(itemOffersCacheKey(tenantId, connectionId, marketplaceId, offers.asin), offers);
+        }
+
+        cachedByAsin.set(offers.asin, offers);
+      }
+    }
+
+    res.json({
+      connectionId,
+      marketplaceId,
+      offers: asins.map((asin) => cachedByAsin.get(asin) ?? emptyItemOffersResult(asin))
     });
   } catch (error) {
     next(error);
@@ -518,4 +641,77 @@ async function mapWithConcurrency<Input, Output>(
 function batchFailureCode(error: unknown) {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
   return message.includes("rate limited") ? "rate_limited" : "unavailable";
+}
+
+function parseAmazonAsins(value: unknown): string[] | string {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) {
+    return "asins must contain between 1 and 20 ASINs";
+  }
+
+  const asins = Array.from(new Set(
+    value
+      .map((item) => String(item ?? "").trim().toUpperCase())
+      .filter((asin) => /^[A-Z0-9]{10}$/.test(asin))
+  ));
+
+  if (!asins.length || asins.length !== value.length) {
+    return "Each item in asins must be a 10-character ASIN";
+  }
+
+  return asins;
+}
+
+function itemOffersCacheKey(tenantId: string, connectionId: string, marketplaceId: string, asin: string) {
+  return `${tenantId}:${connectionId}:${marketplaceId}:${asin}`;
+}
+
+function getCachedItemOffers(cacheKey: string) {
+  const entry = itemOffersCache.get(cacheKey);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    itemOffersCache.delete(cacheKey);
+    return undefined;
+  }
+
+  return entry.value;
+}
+
+function cacheItemOffers(cacheKey: string, value: ReturnType<typeof normalizeAmazonItemOffers>) {
+  itemOffersCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + itemOffersCacheTtlMs
+  });
+}
+
+async function withItemOffersBatchSlot<T>(request: () => Promise<T>) {
+  // getCompetitiveSummary has a conservative default rate of 0.033 request/second.
+  // The short cache above normally makes this delay invisible, but this keeps
+  // parallel mobile refreshes from turning into a stream of 429 responses.
+  const now = Date.now();
+  const startAt = Math.max(now, nextItemOffersBatchStartAt);
+  nextItemOffersBatchStartAt = startAt + 30_000;
+
+  if (startAt > now) {
+    await delay(startAt - now);
+  }
+
+  return request();
+}
+
+function emptyItemOffersResult(asin: string) {
+  return {
+    asin,
+    visibleOfferCount: 0,
+    sellerCount: 0,
+    fbaOfferCount: 0,
+    fbmOfferCount: 0,
+    amazonOfferCount: 0,
+    buyBoxAvailable: false,
+    offers: [],
+    error: "Amazon did not return an offer result for this ASIN."
+  };
 }

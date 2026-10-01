@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildAmazonItemOffersBatchRequest,
   buildAmazonCatalogSearchUrl,
   buildAmazonOrdersSearchUrl,
   getSpApiEndpoint,
   inferCatalogIdentifierType,
+  normalizeAmazonItemOffers,
+  normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
   normalizeAmazonOrderSearch,
   normalizePricingListings,
@@ -180,6 +183,128 @@ test("normalizes seller listings with their SKU, type, and current offer price",
     ],
     nextPageToken: "next-page"
   });
+});
+
+test("builds current Product Pricing competitive-summary requests without a public storefront", () => {
+  const batch = buildAmazonItemOffersBatchRequest({
+    asins: ["B0GSDRQN6L", "B0GVLXSM9B", "B0GSDRQN6L"],
+    marketplaceId: "ATVPDKIKX0DER"
+  });
+
+  assert.equal(batch.url.pathname, "/batches/products/pricing/2022-05-01/items/competitiveSummary");
+  assert.deepEqual(batch.body, {
+    requests: [
+      {
+        asin: "B0GSDRQN6L",
+        marketplaceId: "ATVPDKIKX0DER",
+        includedData: ["featuredBuyingOptions", "lowestPricedOffers"],
+        lowestPricedOffersInputs: [{ itemCondition: "New", offerType: "Consumer" }],
+        uri: "/products/pricing/2022-05-01/items/competitiveSummary",
+        method: "GET",
+      },
+      {
+        asin: "B0GVLXSM9B",
+        marketplaceId: "ATVPDKIKX0DER",
+        includedData: ["featuredBuyingOptions", "lowestPricedOffers"],
+        lowestPricedOffersInputs: [{ itemCondition: "New", offerType: "Consumer" }],
+        uri: "/products/pricing/2022-05-01/items/competitiveSummary",
+        method: "GET",
+      }
+    ]
+  });
+});
+
+test("normalizes current Product Pricing offers and the Featured Offer", () => {
+  const offers = normalizeAmazonItemOffers({
+    asin: "B0GSDRQN6L",
+    featuredBuyingOptions: [{
+      buyingOptionType: "New",
+      segmentedFeaturedOffers: [{
+        sellerId: "A-LOWEST",
+        condition: "New",
+        fulfillmentType: "MFN",
+        listingPrice: { amount: 85, currencyCode: "USD" },
+        shippingOptions: [{ shippingOptionType: "DEFAULT", price: { amount: 4.99, currencyCode: "USD" } }]
+      }]
+    }],
+    lowestPricedOffers: [{
+      lowestPricedOffersInput: { itemCondition: "New", offerType: "Consumer" },
+      offers: [
+        {
+          sellerId: "A-LOWEST",
+          condition: "New",
+          fulfillmentType: "MFN",
+          listingPrice: { amount: 85, currencyCode: "USD" },
+          shippingOptions: [{ shippingOptionType: "DEFAULT", price: { amount: 4.99, currencyCode: "USD" } }]
+        },
+        {
+          sellerId: "A-FBA",
+          condition: "New",
+          fulfillmentType: "AFN",
+          listingPrice: { amount: 90, currencyCode: "USD" },
+          primeDetails: { eligibleForPrime: true }
+        }
+      ]
+    }]
+  }, "B0GSDRQN6L");
+
+  assert.deepEqual(offers, {
+    asin: "B0GSDRQN6L",
+    visibleOfferCount: 2,
+    sellerCount: 2,
+    fbaOfferCount: 1,
+    fbmOfferCount: 1,
+    amazonOfferCount: 0,
+    buyBoxAvailable: true,
+    buyBoxSellerId: "A-LOWEST",
+    buyBoxPrice: 89.99,
+    currency: "USD",
+    offers: [
+      {
+        sellerId: "A-LOWEST",
+        fulfillment: "FBM",
+        condition: "New",
+        listingPrice: 85,
+        shippingPrice: 4.99,
+        landedPrice: 89.99,
+        currency: "USD",
+        isBuyBoxWinner: true
+      },
+      {
+        sellerId: "A-FBA",
+        fulfillment: "FBA",
+        condition: "New",
+        listingPrice: 90,
+        landedPrice: 90,
+        currency: "USD",
+        isPrime: true
+      }
+    ]
+  });
+});
+
+test("keeps successful Product Pricing batch results when another ASIN fails", () => {
+  const results = normalizeAmazonItemOffersBatch({
+    responses: [
+      {
+        status: { statusCode: 200 },
+        body: {
+          asin: "B0GSDRQN6L",
+          lowestPricedOffers: []
+        }
+      },
+      {
+        status: { statusCode: 400 },
+        request: { ASIN: "B0GVLXSM9B" },
+        body: { errors: [{ code: "InvalidInput", message: "ASIN is invalid" }] }
+      }
+    ]
+  }, ["B0GSDRQN6L", "B0GVLXSM9B"]);
+
+  assert.equal(results[0].asin, "B0GSDRQN6L");
+  assert.equal(results[0].error, undefined);
+  assert.equal(results[1].asin, "B0GVLXSM9B");
+  assert.equal(results[1].error, "InvalidInput: ASIN is invalid");
 });
 
 test("normalizes fulfillment-only order lines without buyer or recipient data", () => {
