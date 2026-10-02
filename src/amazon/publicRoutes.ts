@@ -41,6 +41,7 @@ type PriceUpdateResult = {
   status: "ready" | "unchanged" | "stale" | "submitted" | "failed";
   submissionId?: string;
   error?: string;
+  authorizationRequired?: boolean;
 };
 
 const itemOffersCache = new Map<string, { expiresAt: number; value: ReturnType<typeof normalizeAmazonItemOffers> }>();
@@ -49,6 +50,12 @@ const sellerStoreNameCache = new Map<string, { expiresAt: number; value?: string
 const sellerStoreNameCacheTtlMs = 6 * 60 * 60 * 1000;
 const sellerStoreNameFailureCacheTtlMs = 5 * 60 * 1000;
 let nextItemOffersBatchStartAt = 0;
+
+function isAmazonAuthorizationFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+
+  return /failed:\s*(401|403)\b|\bunauthori[sz]ed\b|\bforbidden\b|access denied/i.test(message);
+}
 
 publicAmazonRouter.get("/connections", async (req, res, next) => {
   try {
@@ -447,7 +454,8 @@ publicAmazonRouter.post("/connections/:connectionId/listings/pricing/match-buy-b
 
     if (!dryRun && !config.SCANNERAZ_PRICE_UPDATES_ENABLED) {
       res.status(409).json({
-        error: "Price updates are not enabled. Activate the Pricing and Product Listing roles, then enable SCANNERAZ_PRICE_UPDATES_ENABLED on the server."
+        code: "price_updates_disabled",
+        error: "Price updates are paused by the ScannerAz server safety policy. This does not indicate that Amazon denied the app."
       });
       return;
     }
@@ -536,7 +544,8 @@ publicAmazonRouter.post("/connections/:connectionId/listings/pricing/match-buy-b
           sku: update.sku,
           targetPrice: update.targetPrice,
           status: "failed",
-          error: error instanceof Error ? error.message : "No pude preparar el cambio de precio."
+          error: error instanceof Error ? error.message : "No pude preparar el cambio de precio.",
+          authorizationRequired: isAmazonAuthorizationFailure(error)
         });
       }
     }
