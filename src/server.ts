@@ -282,10 +282,10 @@ function isAmazonWebsiteLoginRequestError(error: unknown) {
 }
 
 app.get("/health", (_req, res) => {
-  // Render reaches this path directly for its platform health check. It exposes
-  // no account, application, or Amazon information.
+  // Render reaches this path directly for its platform health check. The write
+  // switch is operational state only; it does not expose account or token data.
   res.setHeader("cache-control", "no-store");
-  res.json({ ok: true });
+  res.json({ ok: true, priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED });
 });
 
 // Once SCANNERAZ_EDGE_SHARED_SECRET is set, Render accepts public traffic only
