@@ -7,6 +7,7 @@ import {
 } from "../storage/connections.js";
 import {
   applyAmazonSellerStoreName,
+  type AmazonPricingListing,
   getAmazonItemOffersBatch,
   getAmazonSellerStoreName,
   getListingsRestrictions,
@@ -251,21 +252,30 @@ publicAmazonRouter.get("/connections/:connectionId/listings/pricing", async (req
 
     assertAmazonSpApiConfig(connection.refreshToken);
     const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
     const response = await searchSellerListings({
       sellerId: connection.sellerId,
       refreshToken: connection.refreshToken,
+      accessToken,
       marketplaceId,
       pageSize,
       pageToken: pageToken || undefined,
       withStatus: "BUYABLE"
     });
     const normalized = normalizePricingListings(response, marketplaceId);
+    const listings = await attachCatalogImagesToPricingListings({
+      listings: normalized.listings,
+      refreshToken: connection.refreshToken,
+      accessToken,
+      marketplaceId,
+    });
 
     res.json({
       connectionId,
       marketplaceId,
       priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED,
-      ...normalized
+      ...normalized,
+      listings,
     });
   } catch (error) {
     next(error);
@@ -710,6 +720,48 @@ function cacheItemOffers(cacheKey: string, value: ReturnType<typeof normalizeAma
     value,
     expiresAt: Date.now() + itemOffersCacheTtlMs
   });
+}
+
+async function attachCatalogImagesToPricingListings(input: {
+  listings: AmazonPricingListing[];
+  refreshToken: string;
+  accessToken: string;
+  marketplaceId: string;
+}) {
+  const asins = Array.from(new Set(
+    input.listings
+      .map((listing) => listing.asin?.trim().toUpperCase())
+      .filter((asin): asin is string => Boolean(asin)),
+  )).slice(0, 20);
+
+  if (!asins.length) {
+    return input.listings;
+  }
+
+  try {
+    const response = await searchCatalogItems({
+      identifiers: asins,
+      identifierType: "ASIN",
+      refreshToken: input.refreshToken,
+      accessToken: input.accessToken,
+      marketplaceId: input.marketplaceId,
+      limit: asins.length,
+    });
+    const imageUrlByAsin = new Map(
+      normalizeCatalogSearchResponse(response, input.marketplaceId)
+        .filter((candidate) => Boolean(candidate.imageUrl))
+        .map((candidate) => [candidate.asin.toUpperCase(), candidate.imageUrl!] as const),
+    );
+
+    return input.listings.map((listing) => {
+      const imageUrl = listing.asin ? imageUrlByAsin.get(listing.asin.toUpperCase()) : undefined;
+      return imageUrl ? { ...listing, imageUrl } : listing;
+    });
+  } catch {
+    // Catalog Images is supplementary. Listings remain available when a
+    // connection lacks the Catalog Items role or Amazon temporarily declines it.
+    return input.listings;
+  }
 }
 
 async function getCachedAmazonSellerStoreName(input: {
