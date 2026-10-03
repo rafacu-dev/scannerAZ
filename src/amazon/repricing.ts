@@ -368,9 +368,10 @@ export async function recordPriceChangeEvent(event: {
 
 /**
  * Earlier re-authorizations created a new connection ID each time, leaving
- * repricing/restock rules and history on the older ID. Move them to the newest
- * connection of the same tenant and seller. Idempotent; runs at startup.
- * A rule already present on the newest connection wins over an older copy.
+ * repricing/restock rules and history on the older ID. The app always works
+ * with the tenant's newest connection, so move them there (per marketplace;
+ * older rows may lack a seller ID). Idempotent; runs at startup. A rule
+ * already present on the newest connection wins over an older copy.
  */
 export async function consolidateDuplicateAmazonConnections() {
   const pool = getPool();
@@ -383,23 +384,26 @@ export async function consolidateDuplicateAmazonConnections() {
   const { rows: moves } = await pool.query<{ old_id: string; keep_id: string }>(`
     SELECT id AS old_id, keep_id FROM (
       SELECT id, first_value(id) OVER (
-        PARTITION BY tenant_id, seller_id, marketplace_id ORDER BY connected_at DESC
+        PARTITION BY tenant_id, marketplace_id ORDER BY connected_at DESC
       ) AS keep_id
       FROM scanneraz_amazon_connections
-      WHERE tenant_id IS NOT NULL AND seller_id IS NOT NULL
+      WHERE tenant_id IS NOT NULL
     ) ranked
     WHERE id <> keep_id
   `);
+
+  const movedRows: Record<string, number> = {};
 
   for (const move of moves) {
     const client = await pool.connect();
 
     try {
       await client.query("BEGIN");
-      await client.query(
+      const events = await client.query(
         `UPDATE scanneraz_repricing_events SET connection_id = $2 WHERE connection_id = $1`,
         [move.old_id, move.keep_id]
       );
+      movedRows.events = (movedRows.events ?? 0) + (events.rowCount ?? 0);
 
       for (const table of ["scanneraz_repricing_rules", "scanneraz_restock_rules"]) {
         const exists = await client.query<{ present: string | null }>(
@@ -411,7 +415,7 @@ export async function consolidateDuplicateAmazonConnections() {
           continue;
         }
 
-        await client.query(
+        const moved = await client.query(
           `
             UPDATE ${table} AS moved SET connection_id = $2
             WHERE moved.connection_id = $1
@@ -421,8 +425,10 @@ export async function consolidateDuplicateAmazonConnections() {
           `,
           [move.old_id, move.keep_id]
         );
+        movedRows[table] = (movedRows[table] ?? 0) + (moved.rowCount ?? 0);
         // Anything left is superseded by a rule on the newest connection.
-        await client.query(`DELETE FROM ${table} WHERE connection_id = $1`, [move.old_id]);
+        const dropped = await client.query(`DELETE FROM ${table} WHERE connection_id = $1`, [move.old_id]);
+        movedRows[`${table}_superseded`] = (movedRows[`${table}_superseded`] ?? 0) + (dropped.rowCount ?? 0);
       }
 
       await client.query("COMMIT");
@@ -435,7 +441,11 @@ export async function consolidateDuplicateAmazonConnections() {
   }
 
   if (moves.length) {
-    console.log(JSON.stringify({ event: "automation.connections_consolidated", moved: moves.length }));
+    console.log(JSON.stringify({
+      event: "automation.connections_consolidated",
+      duplicateConnections: moves.length,
+      movedRows,
+    }));
   }
 }
 
