@@ -18,6 +18,7 @@ import {
 } from "./amazon/oauth.js";
 import { publicAmazonRouter } from "./amazon/publicRoutes.js";
 import { initializeRepricingStore, triggerRepricingCycle } from "./amazon/repricing.js";
+import { initializeRestockStore } from "./amazon/restock.js";
 import { amazonRouter } from "./amazon/routes.js";
 import { inventoryRouter } from "./inventory/routes.js";
 import { initializeInventoryStore } from "./inventory/store.js";
@@ -699,6 +700,7 @@ async function startServer() {
   try {
     await initializeAccountStore();
     await Promise.all([initializeAmazonConnectionStore(), initializeInventoryStore(), initializeRepricingStore()]);
+    await initializeRestockStore();
     app.listen(config.PORT, () => {
       console.log(`ScannerAz listening at ${config.APP_BASE_URL}`);
     });

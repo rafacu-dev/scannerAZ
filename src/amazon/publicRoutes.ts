@@ -37,6 +37,7 @@ import {
   recordPriceChangeEvent,
   saveRepricingRule
 } from "./repricing.js";
+import { listRestockRulesForConnection, saveRestockRule } from "./restock.js";
 
 export const publicAmazonRouter = express.Router();
 
@@ -704,6 +705,65 @@ publicAmazonRouter.get("/connections/:connectionId/repricing/rules", async (req,
       priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED,
       rules: await listRepricingRulesForConnection(tenantId, connectionId),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+publicAmazonRouter.get("/connections/:connectionId/restock/rules", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    res.json({ connectionId, rules: await listRestockRulesForConnection(tenantId, connectionId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Save the automatic restock rule for one SKU: when Amazon reports 0 units,
+ * the scheduled cycle sets the merchant-fulfilled quantity back to `quantity`.
+ */
+publicAmazonRouter.put("/connections/:connectionId/restock/rules/:sku", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const sku = String(req.params.sku ?? "").trim();
+    const quantity = Number(req.body?.quantity);
+
+    if (!sku || sku.length > 200) {
+      res.status(400).json({ error: "sku is invalid" });
+      return;
+    }
+
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 10000) {
+      res.status(400).json({ error: "quantity must be a whole number between 1 and 10000" });
+      return;
+    }
+
+    const rule = await saveRestockRule({
+      tenantId,
+      connectionId,
+      sku,
+      enabled: req.body?.enabled === true,
+      quantity,
+    });
+
+    res.json({ rule });
   } catch (error) {
     next(error);
   }

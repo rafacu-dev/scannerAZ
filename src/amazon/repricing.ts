@@ -2,6 +2,7 @@ import { Pool } from "pg";
 import { assertAmazonSpApiConfig, config } from "../config.js";
 import { getAmazonConnection } from "../storage/connections.js";
 import { withItemOffersBatchSlot } from "./offersRateLimit.js";
+import { runRestockCycle } from "./restock.js";
 import {
   type AmazonItemOffer,
   getAmazonItemOffersBatch,
@@ -101,6 +102,11 @@ const localEvents: Array<RepricingEvent & { tenantId: string }> = [];
 let pool: Pool | undefined;
 let schemaPromise: Promise<void> | undefined;
 let repricingCycleRunning = false;
+
+/** Shared with the restock automation, which lives in the same database. */
+export function getAutomationPool() {
+  return getPool();
+}
 
 function getPool() {
   if (!config.DATABASE_URL) {
@@ -628,6 +634,14 @@ export async function runRepricingCycle() {
   repricingCycleRunning = true;
 
   try {
+    // Restock runs first: it only reads and patches listings, while repricing
+    // waits on Product Pricing's slow rate limit.
+    try {
+      await runRestockCycle();
+    } catch (error) {
+      console.error("Restock cycle failed", error);
+    }
+
     const rules = await listEnabledRepricingRules();
     const rulesByConnection = new Map<string, RepricingRule[]>();
 

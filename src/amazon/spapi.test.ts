@@ -14,7 +14,8 @@ import {
   normalizeCatalogSearchResponse,
   normalizeAmazonOrderSearch,
   normalizePricingListings,
-  prepareListingPriceUpdate
+  prepareListingPriceUpdate,
+  prepareListingRestock
 } from "./spapi.js";
 
 test("uses the North America sandbox endpoint when requested", () => {
@@ -493,4 +494,32 @@ test("groups deferred Amazon transactions by release date", () => {
     { date: "2026-10-04", amount: 10, currency: "USD", transactionCount: 1 },
     { date: "2026-10-06", amount: 21.25, currency: "USD", transactionCount: 2 }
   ]);
+});
+
+test("prepares a merchant quantity restock while keeping handling time", () => {
+  const prepared = prepareListingRestock({
+    sku: "SKU-1",
+    summaries: [{ marketplaceId: "ATVPDKIKX0DER", asin: "B000000001", itemName: "Cart" }],
+    productTypes: [{ marketplaceId: "ATVPDKIKX0DER", productType: "CART" }],
+    attributes: {
+      fulfillment_availability: [{ fulfillment_channel_code: "DEFAULT", quantity: 0, lead_time_to_ship_max_days: 2 }]
+    }
+  }, "ATVPDKIKX0DER", 5);
+
+  assert.equal(prepared.fulfillment, "merchant");
+  assert.equal(prepared.currentQuantity, 0);
+  assert.deepEqual(prepared.patch.patches[0]?.value, [
+    { fulfillment_channel_code: "DEFAULT", quantity: 5, lead_time_to_ship_max_days: 2 }
+  ]);
+});
+
+test("flags Amazon-fulfilled listings as not restockable", () => {
+  const prepared = prepareListingRestock({
+    sku: "SKU-2",
+    productTypes: [{ productType: "CART" }],
+    attributes: { fulfillment_availability: [{ fulfillment_channel_code: "AMAZON_NA" }] }
+  }, "ATVPDKIKX0DER", 5);
+
+  assert.equal(prepared.fulfillment, "amazon");
+  assert.equal(prepared.currentQuantity, undefined);
 });

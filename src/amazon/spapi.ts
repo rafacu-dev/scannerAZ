@@ -905,7 +905,7 @@ export async function patchSellerListingPrice(input: {
   refreshToken: string;
   accessToken?: string;
   marketplaceId?: string;
-  patch: PreparedListingPriceUpdate["patch"];
+  patch: PreparedListingPriceUpdate["patch"] | PreparedListingRestock["patch"];
 }) {
   const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
   const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
@@ -1050,6 +1050,77 @@ export function prepareListingPriceUpdate(
         op: "replace",
         path: "/attributes/purchasable_offer",
         value: updatedOffers
+      }]
+    }
+  };
+}
+
+export type PreparedListingRestock = {
+  sku: string;
+  title?: string;
+  productType: string;
+  /** Only merchant-fulfilled (FBM) quantity can be written through Listings Items. */
+  fulfillment: "merchant" | "amazon" | "unknown";
+  currentQuantity?: number;
+  targetQuantity: number;
+  patch: {
+    productType: string;
+    patches: Array<{
+      op: "replace";
+      path: "/attributes/fulfillment_availability";
+      value: Array<Record<string, unknown>>;
+    }>;
+  };
+};
+
+/**
+ * Prepares a Listings Items patch that sets the merchant-fulfilled quantity.
+ * Existing fulfillment fields such as handling time are preserved.
+ */
+export function prepareListingRestock(
+  rawListing: unknown,
+  marketplaceId: string,
+  targetQuantity: number
+): PreparedListingRestock {
+  const listing = asRecord(rawListing);
+  const sku = stringValue(listing?.sku);
+  const productType = listingProductType(listing, marketplaceId);
+
+  if (!sku || !productType) {
+    throw new Error("Amazon did not return the SKU and product type required to update this quantity.");
+  }
+
+  const summary = marketplaceRecord(listing?.summaries, marketplaceId);
+  const availability = recordArray(asRecord(listing?.attributes)?.fulfillment_availability);
+  const merchantIndex = availability.findIndex((entry) =>
+    (stringValue(entry.fulfillment_channel_code) ?? "DEFAULT").toUpperCase() === "DEFAULT");
+  const fulfillment = merchantIndex >= 0
+    ? "merchant"
+    : availability.length
+      ? "amazon"
+      : "unknown";
+  const currentQuantity = merchantIndex >= 0 ? numberValue(availability[merchantIndex].quantity) : undefined;
+  const updated = cloneJson(availability);
+
+  if (merchantIndex >= 0) {
+    updated[merchantIndex] = { ...updated[merchantIndex], quantity: targetQuantity };
+  } else {
+    updated.push({ fulfillment_channel_code: "DEFAULT", quantity: targetQuantity });
+  }
+
+  return {
+    sku,
+    title: stringValue(summary?.itemName) ?? stringValue(summary?.item_name),
+    productType,
+    fulfillment,
+    currentQuantity,
+    targetQuantity,
+    patch: {
+      productType,
+      patches: [{
+        op: "replace",
+        path: "/attributes/fulfillment_availability",
+        value: updated
       }]
     }
   };
