@@ -7,13 +7,18 @@ import {
 } from "../storage/connections.js";
 import {
   applyAmazonSellerStoreName,
+  type AmazonDeferredTransaction,
+  type AmazonFinancialEventGroup,
   type AmazonPricingListing,
+  buildAmazonReleaseCalendar,
+  getAmazonFinancialEventGroups,
   getAmazonItemOffersBatch,
   getAmazonSellerStoreName,
   getListingsRestrictions,
   getSellerListingItem,
   getLwaAccessToken,
   inferCatalogIdentifierType,
+  listAmazonDeferredTransactions,
   normalizeAmazonItemOffers,
   normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
@@ -50,6 +55,10 @@ const sellerStoreNameCache = new Map<string, { expiresAt: number; value?: string
 const sellerStoreNameCacheTtlMs = 6 * 60 * 60 * 1000;
 const sellerStoreNameFailureCacheTtlMs = 5 * 60 * 1000;
 let nextItemOffersBatchStartAt = 0;
+const releaseCalendarCache = new Map<string, { expiresAt: number; value: unknown }>();
+const releaseCalendarCacheTtlMs = 5 * 60 * 1000;
+const releaseCalendarLookbackDays = 90;
+const releaseCalendarMaxPages = 10;
 
 function isAmazonAuthorizationFailure(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
@@ -557,6 +566,101 @@ publicAmazonRouter.post("/connections/:connectionId/listings/pricing/match-buy-b
       priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED,
       results
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Release calendar for the Finances tab. Every amount comes from Amazon's
+ * deferred transactions and their maturity date; nothing is estimated from
+ * order data. Recent payment groups are added as bank-transfer markers.
+ */
+publicAmazonRouter.get("/connections/:connectionId/finances/release-calendar", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const cacheKey = `${tenantId}:${connectionId}`;
+    const cached = releaseCalendarCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > Date.now() && req.query.refresh !== "1") {
+      res.json(cached.value);
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    const now = Date.now();
+    const postedAfter = new Date(now - releaseCalendarLookbackDays * 24 * 60 * 60 * 1000).toISOString();
+    const transactions: AmazonDeferredTransaction[] = [];
+    let nextToken: string | undefined;
+    let pages = 0;
+
+    try {
+      do {
+        const page = await listAmazonDeferredTransactions({
+          refreshToken: connection.refreshToken,
+          accessToken,
+          postedAfter,
+          marketplaceId,
+          nextToken,
+        });
+        transactions.push(...page.transactions);
+        nextToken = page.nextToken;
+        pages += 1;
+      } while (nextToken && pages < releaseCalendarMaxPages);
+    } catch (error) {
+      if (!isAmazonAuthorizationFailure(error)) {
+        throw error;
+      }
+
+      res.json({
+        connectionId,
+        marketplaceId,
+        authorizationRequired: true,
+        error: "Amazon requires the Finance and Accounting role to read payouts.",
+        days: [],
+        transfers: [],
+      });
+      return;
+    }
+
+    let transfers: AmazonFinancialEventGroup[] = [];
+
+    try {
+      transfers = (await getAmazonFinancialEventGroups({
+        refreshToken: connection.refreshToken,
+        accessToken,
+        startedAfter: postedAfter,
+        startedBefore: new Date(now - 3 * 60 * 1000).toISOString(),
+      })).filter((group) => group.transferDate && group.amount !== undefined);
+    } catch {
+      // Transfers are supplementary context; the release calendar stands alone.
+    }
+
+    const days = buildAmazonReleaseCalendar(transactions);
+    const value = {
+      connectionId,
+      marketplaceId,
+      authorizationRequired: false,
+      generatedAt: new Date(now).toISOString(),
+      truncated: Boolean(nextToken),
+      currency: days[0]?.currency ?? transfers[0]?.currency,
+      totalPending: Math.round(days.reduce((sum, day) => sum + day.amount, 0) * 100) / 100,
+      days,
+      transfers,
+    };
+
+    releaseCalendarCache.set(cacheKey, { value, expiresAt: now + releaseCalendarCacheTtlMs });
+    res.json(value);
   } catch (error) {
     next(error);
   }

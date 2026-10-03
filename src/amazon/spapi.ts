@@ -88,6 +88,21 @@ export type AmazonPricingListing = {
 };
 
 /**
+ * A payment group is Amazon's authoritative grouping for a disbursement.  It
+ * is intentionally kept separate from order data: the transfer date and
+ * amount must come from Finances, not from an estimate based on sales.
+ */
+export type AmazonFinancialEventGroup = {
+  id: string;
+  startedAt?: string;
+  transferDate?: string;
+  processingStatus?: string;
+  transferStatus?: string;
+  amount?: number;
+  currency?: string;
+};
+
+/**
  * Product Pricing v2022 returns up to 20 lowest-priced offers for an ASIN,
  * plus the featured offers. It does not claim to enumerate every seller in
  * the marketplace.
@@ -448,6 +463,180 @@ export async function getAmazonSellerStoreName(input: {
   }
 
   return normalizeAmazonSellerStoreName(parsedBody, input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+}
+
+/**
+ * Finances v0 exposes Amazon's payment groups, including their transfer date
+ * and original total. It requires the Finance and Accounting SP-API role.
+ */
+export async function getAmazonFinancialEventGroups(input: {
+  refreshToken: string;
+  accessToken?: string;
+  startedAfter: string;
+  startedBefore: string;
+  maxResultsPerPage?: number;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL("/finances/v0/financialEventGroups", endpoint);
+  url.searchParams.set("FinancialEventGroupStartedAfter", input.startedAfter);
+  url.searchParams.set("FinancialEventGroupStartedBefore", input.startedBefore);
+  url.searchParams.set("MaxResultsPerPage", String(Math.max(1, Math.min(input.maxResultsPerPage ?? 100, 100))));
+
+  const response = await fetch(url, { headers: spApiReadHeaders(accessToken) });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Finances", response.status, parsedBody, "Finance and Accounting"));
+  }
+
+  return normalizeAmazonFinancialEventGroups(parsedBody);
+}
+
+export function normalizeAmazonFinancialEventGroups(value: unknown): AmazonFinancialEventGroup[] {
+  const root = asRecord(value);
+  const payload = asRecord(recordValue(root, ["payload"])) ?? root;
+  const groups = recordArray(recordValue(payload, ["FinancialEventGroupList", "financialEventGroupList", "financialEventGroups"]));
+
+  return groups.map((entry) => {
+    const group = asRecord(entry);
+    const total = asRecord(recordValue(group, ["OriginalTotal", "originalTotal"]));
+    const amount = numberValue(recordValue(total, ["CurrencyAmount", "currencyAmount"]));
+    const id = stringValue(recordValue(group, ["FinancialEventGroupId", "financialEventGroupId", "id"])) ?? "";
+
+    return {
+      id,
+      startedAt: stringValue(recordValue(group, ["FinancialEventGroupStartedDate", "financialEventGroupStartedDate"])),
+      transferDate: stringValue(recordValue(group, ["FundTransferDate", "fundTransferDate"])),
+      processingStatus: stringValue(recordValue(group, ["ProcessingStatus", "processingStatus"])),
+      transferStatus: stringValue(recordValue(group, ["FundTransferStatus", "fundTransferStatus"])),
+      amount,
+      currency: stringValue(recordValue(total, ["CurrencyCode", "currencyCode"])),
+    };
+  }).filter((group) => Boolean(group.id));
+}
+
+/**
+ * A deferred transaction is sale money Amazon is holding (for example under
+ * the DD+7 delivery-date policy). Its maturity date is the day Amazon says
+ * the funds are released into the seller's available balance.
+ */
+export type AmazonDeferredTransaction = {
+  id?: string;
+  type?: string;
+  description?: string;
+  postedDate?: string;
+  maturityDate: string;
+  deferralReason?: string;
+  orderId?: string;
+  amount: number;
+  currency?: string;
+};
+
+export type AmazonReleaseCalendarDay = {
+  date: string;
+  amount: number;
+  currency?: string;
+  transactionCount: number;
+};
+
+/**
+ * Finances 2024-06-19 lists deferred transactions with their release date.
+ * It requires the Finance and Accounting SP-API role, like Finances v0.
+ */
+export async function listAmazonDeferredTransactions(input: {
+  refreshToken: string;
+  accessToken?: string;
+  postedAfter: string;
+  marketplaceId?: string;
+  nextToken?: string;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL("/finances/2024-06-19/transactions", endpoint);
+  url.searchParams.set("postedAfter", input.postedAfter);
+  url.searchParams.set("transactionStatus", "DEFERRED");
+
+  if (input.marketplaceId) {
+    url.searchParams.set("marketplaceId", input.marketplaceId);
+  }
+
+  if (input.nextToken) {
+    url.searchParams.set("nextToken", input.nextToken);
+  }
+
+  const response = await fetch(url, { headers: spApiReadHeaders(accessToken) });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Finances", response.status, parsedBody, "Finance and Accounting"));
+  }
+
+  return normalizeAmazonDeferredTransactions(parsedBody);
+}
+
+export function normalizeAmazonDeferredTransactions(value: unknown): {
+  transactions: AmazonDeferredTransaction[];
+  nextToken?: string;
+} {
+  const root = asRecord(value);
+  const payload = asRecord(recordValue(root, ["payload"])) ?? root;
+  const transactions = recordArray(recordValue(payload, ["transactions"])).flatMap((transaction) => {
+    const deferredContext = recordArray(recordValue(transaction, ["contexts"]))
+      .find((context) => recordValue(context, ["maturityDate"]) !== undefined);
+    const maturityDate = stringValue(recordValue(deferredContext, ["maturityDate"]));
+    const total = asRecord(recordValue(transaction, ["totalAmount"]));
+    const amount = numberValue(recordValue(total, ["currencyAmount"]));
+
+    if (!maturityDate || amount === undefined) {
+      return [];
+    }
+
+    const orderId = recordArray(recordValue(transaction, ["relatedIdentifiers"]))
+      .find((identifier) => stringValue(recordValue(identifier, ["relatedIdentifierName"])) === "ORDER_ID");
+
+    return [{
+      id: stringValue(recordValue(transaction, ["transactionId"])),
+      type: stringValue(recordValue(transaction, ["transactionType"])),
+      description: stringValue(recordValue(transaction, ["description"])),
+      postedDate: stringValue(recordValue(transaction, ["postedDate"])),
+      maturityDate,
+      deferralReason: stringValue(recordValue(deferredContext, ["deferralReason"])),
+      orderId: stringValue(recordValue(orderId, ["relatedIdentifierValue"])),
+      amount,
+      currency: stringValue(recordValue(total, ["currencyCode"])),
+    }];
+  });
+
+  return {
+    transactions,
+    nextToken: stringValue(recordValue(payload, ["nextToken"])),
+  };
+}
+
+/**
+ * Sums deferred transactions by their UTC release day. Amounts are net:
+ * refunds and fees that mature on the same day reduce that day's release.
+ */
+export function buildAmazonReleaseCalendar(transactions: AmazonDeferredTransaction[]): AmazonReleaseCalendarDay[] {
+  const days = new Map<string, AmazonReleaseCalendarDay>();
+
+  for (const transaction of transactions) {
+    const date = transaction.maturityDate.slice(0, 10);
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      continue;
+    }
+
+    const day = days.get(date) ?? { date, amount: 0, currency: transaction.currency, transactionCount: 0 };
+    day.amount = Math.round((day.amount + transaction.amount) * 100) / 100;
+    day.transactionCount += 1;
+    days.set(date, day);
+  }
+
+  return [...days.values()].sort((left, right) => left.date.localeCompare(right.date));
 }
 
 function normalizeAmazonSellerStoreName(response: unknown, marketplaceId: string) {
@@ -1264,6 +1453,19 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function numberValue(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  return undefined;
 }
 
 function marketplaceRecord(value: unknown, marketplaceId: string) {

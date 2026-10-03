@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   applyAmazonSellerStoreName,
+  buildAmazonReleaseCalendar,
   buildAmazonItemOffersBatchRequest,
   buildAmazonCatalogSearchUrl,
   buildAmazonOrdersSearchUrl,
   getSpApiEndpoint,
   inferCatalogIdentifierType,
+  normalizeAmazonDeferredTransactions,
   normalizeAmazonItemOffers,
   normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
@@ -449,4 +451,46 @@ test("prepares a price patch while preserving existing offer fields", () => {
     ]
   }]);
   assert.deepEqual(offers[1].our_price, [{ schedule: [{ value_with_tax: 89.99 }] }]);
+});
+
+test("groups deferred Amazon transactions by release date", () => {
+  const page = normalizeAmazonDeferredTransactions({
+    payload: {
+      nextToken: "next-page",
+      transactions: [
+        {
+          transactionId: "t1",
+          transactionType: "Shipment",
+          postedDate: "2026-09-28T10:00:00Z",
+          totalAmount: { currencyCode: "USD", currencyAmount: 25.5 },
+          relatedIdentifiers: [{ relatedIdentifierName: "ORDER_ID", relatedIdentifierValue: "111-1" }],
+          contexts: [{ contextType: "DeferredContext", deferralReason: "DD7", maturityDate: "2026-10-06T07:00:00Z" }]
+        },
+        {
+          transactionId: "t2",
+          totalAmount: { currencyCode: "USD", currencyAmount: -4.25 },
+          contexts: [{ contextType: "DeferredContext", maturityDate: "2026-10-06T19:00:00Z" }]
+        },
+        {
+          transactionId: "t3",
+          totalAmount: { currencyCode: "USD", currencyAmount: 10 },
+          contexts: [{ contextType: "DeferredContext", maturityDate: "2026-10-04T07:00:00Z" }]
+        },
+        {
+          transactionId: "no-maturity",
+          totalAmount: { currencyCode: "USD", currencyAmount: 99 },
+          contexts: []
+        }
+      ]
+    }
+  });
+
+  assert.equal(page.nextToken, "next-page");
+  assert.equal(page.transactions.length, 3);
+  assert.equal(page.transactions[0]?.orderId, "111-1");
+  assert.equal(page.transactions[0]?.deferralReason, "DD7");
+  assert.deepEqual(buildAmazonReleaseCalendar(page.transactions), [
+    { date: "2026-10-04", amount: 10, currency: "USD", transactionCount: 1 },
+    { date: "2026-10-06", amount: 21.25, currency: "USD", transactionCount: 2 }
+  ]);
 });
