@@ -34,6 +34,7 @@ import {
   defaultRepricingUndercut,
   listRepricingEventsForConnection,
   listRepricingRulesForConnection,
+  recordPriceChangeEvent,
   saveRepricingRule
 } from "./repricing.js";
 
@@ -545,6 +546,21 @@ publicAmazonRouter.post("/connections/:connectionId/listings/pricing/match-buy-b
           patch: prepared.patch
         });
         const submissionId = stringResponseValue(submission, "submissionId");
+
+        try {
+          await recordPriceChangeEvent({
+            tenantId,
+            connectionId,
+            source: "manual",
+            sku: prepared.sku,
+            title: prepared.title,
+            previousPrice: prepared.currentPrice,
+            newPrice: prepared.targetPrice,
+          });
+        } catch (error) {
+          // Amazon already accepted the change; history is best-effort.
+          console.error(`Could not record manual price history for ${prepared.sku}`, error);
+        }
 
         results.push({
           sku: prepared.sku,

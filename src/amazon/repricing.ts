@@ -38,31 +38,38 @@ export type RepricingStrategy = "match" | "undercut";
 
 export type RepricingStatus = "updated" | "unchanged" | "at_minimum" | "no_competitors" | "failed";
 
-/** One price change the automatic repricer submitted to Amazon. */
+/**
+ * One price change submitted to Amazon, either by the automatic repricer or
+ * manually by the seller from the app's repricing batch.
+ */
 export type RepricingEvent = {
   id: string;
   connectionId: string;
+  source: RepricingEventSource;
   sku: string;
-  asin: string;
+  asin?: string;
   title?: string;
-  previousPrice: number;
+  previousPrice?: number;
   newPrice: number;
   competitorPrice?: number;
-  strategy: RepricingStrategy;
+  strategy?: RepricingStrategy;
   atMinimum: boolean;
   createdAt: string;
 };
 
+export type RepricingEventSource = "automatic" | "manual";
+
 type RepricingEventRow = {
   id: string | number;
   connection_id: string;
+  source: RepricingEventSource;
   sku: string;
-  asin: string;
+  asin: string | null;
   title: string | null;
-  previous_price: string | number;
+  previous_price: string | number | null;
   new_price: string | number;
   competitor_price: string | number | null;
-  strategy: RepricingStrategy;
+  strategy: RepricingStrategy | null;
   at_minimum: boolean;
   created_at: Date | string;
 };
@@ -160,6 +167,15 @@ export async function initializeRepricingStore() {
         created_at TIMESTAMPTZ NOT NULL
       );
 
+      -- Manual batch changes share this log; they may lack an ASIN, a known
+      -- previous price, or a strategy.
+      ALTER TABLE scanneraz_repricing_events
+      ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'automatic';
+
+      ALTER TABLE scanneraz_repricing_events ALTER COLUMN asin DROP NOT NULL;
+      ALTER TABLE scanneraz_repricing_events ALTER COLUMN previous_price DROP NOT NULL;
+      ALTER TABLE scanneraz_repricing_events ALTER COLUMN strategy DROP NOT NULL;
+
       CREATE INDEX IF NOT EXISTS scanneraz_repricing_events_connection_idx
       ON scanneraz_repricing_events (tenant_id, connection_id, created_at DESC);
     `)
@@ -209,13 +225,14 @@ function eventFromRow(row: RepricingEventRow): RepricingEvent {
   return {
     id: String(row.id),
     connectionId: row.connection_id,
+    source: row.source,
     sku: row.sku,
-    asin: row.asin,
+    asin: row.asin ?? undefined,
     title: row.title ?? undefined,
-    previousPrice: Number(row.previous_price),
+    previousPrice: optionalNumber(row.previous_price),
     newPrice: Number(row.new_price),
     competitorPrice: optionalNumber(row.competitor_price),
-    strategy: row.strategy,
+    strategy: row.strategy ?? undefined,
     atMinimum: row.at_minimum,
     createdAt: new Date(row.created_at).toISOString(),
   };
@@ -246,36 +263,44 @@ export async function listRepricingEventsForConnection(tenantId: string, connect
     .map(({ tenantId: _tenantId, ...event }) => event);
 }
 
-async function recordRepricingEvent(rule: RepricingRule, event: {
+export async function recordPriceChangeEvent(event: {
+  tenantId: string;
+  connectionId: string;
+  source: RepricingEventSource;
+  sku: string;
+  asin?: string;
   title?: string;
-  previousPrice: number;
+  previousPrice?: number;
   newPrice: number;
   competitorPrice?: number;
-  atMinimum: boolean;
+  strategy?: RepricingStrategy;
+  atMinimum?: boolean;
 }) {
   const createdAt = new Date().toISOString();
   const connectionPool = getPool();
 
   if (connectionPool) {
+    await initializeRepricingStore();
     await connectionPool.query(
       `
         INSERT INTO scanneraz_repricing_events (
-          tenant_id, connection_id, sku, asin, title, previous_price, new_price,
+          tenant_id, connection_id, source, sku, asin, title, previous_price, new_price,
           competitor_price, strategy, at_minimum, created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       `,
       [
-        rule.tenantId,
-        rule.connectionId,
-        rule.sku,
-        rule.asin,
+        event.tenantId,
+        event.connectionId,
+        event.source,
+        event.sku,
+        event.asin ?? null,
         event.title ?? null,
-        event.previousPrice,
+        event.previousPrice ?? null,
         event.newPrice,
         event.competitorPrice ?? null,
-        rule.strategy,
-        event.atMinimum,
+        event.strategy ?? null,
+        event.atMinimum ?? false,
         createdAt
       ]
     );
@@ -284,16 +309,17 @@ async function recordRepricingEvent(rule: RepricingRule, event: {
 
   localEvents.push({
     id: String(localEvents.length + 1),
-    tenantId: rule.tenantId,
-    connectionId: rule.connectionId,
-    sku: rule.sku,
-    asin: rule.asin,
+    tenantId: event.tenantId,
+    connectionId: event.connectionId,
+    source: event.source,
+    sku: event.sku,
+    asin: event.asin,
     title: event.title,
     previousPrice: event.previousPrice,
     newPrice: event.newPrice,
     competitorPrice: event.competitorPrice,
-    strategy: rule.strategy,
-    atMinimum: event.atMinimum,
+    strategy: event.strategy,
+    atMinimum: event.atMinimum ?? false,
     createdAt,
   });
 }
@@ -566,7 +592,13 @@ async function repriceConnection(connectionId: string, rules: RepricingRule[]) {
         });
 
         try {
-          await recordRepricingEvent(rule, {
+          await recordPriceChangeEvent({
+            tenantId: rule.tenantId,
+            connectionId: rule.connectionId,
+            source: "automatic",
+            sku: rule.sku,
+            asin: rule.asin,
+            strategy: rule.strategy,
             title: prepared.title,
             previousPrice: current.currentPrice,
             newPrice: decision.targetPrice,
