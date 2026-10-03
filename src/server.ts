@@ -19,6 +19,7 @@ import {
 import { publicAmazonRouter } from "./amazon/publicRoutes.js";
 import { initializeRepricingStore, triggerRepricingCycle } from "./amazon/repricing.js";
 import { initializeRestockStore } from "./amazon/restock.js";
+import { initializePushStore, notificationsRouter } from "./notifications/push.js";
 import { amazonRouter } from "./amazon/routes.js";
 import { inventoryRouter } from "./inventory/routes.js";
 import { initializeInventoryStore } from "./inventory/store.js";
@@ -329,6 +330,14 @@ app.use(
   requireTenantSession,
   publicTenantRateLimit,
   inventoryRouter
+);
+app.use(
+  "/api/public/notifications",
+  markSensitiveResponse,
+  requirePublicAppAccess,
+  requireTenantSession,
+  publicTenantRateLimit,
+  notificationsRouter
 );
 app.use("/api/retail", retailRouter);
 app.use("/api/retail/target", targetRouter);
@@ -701,6 +710,7 @@ async function startServer() {
     await initializeAccountStore();
     await Promise.all([initializeAmazonConnectionStore(), initializeInventoryStore(), initializeRepricingStore()]);
     await initializeRestockStore();
+    await initializePushStore();
     app.listen(config.PORT, () => {
       console.log(`ScannerAz listening at ${config.APP_BASE_URL}`);
     });

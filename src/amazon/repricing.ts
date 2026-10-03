@@ -3,6 +3,7 @@ import { assertAmazonSpApiConfig, config } from "../config.js";
 import { getAmazonConnection } from "../storage/connections.js";
 import { withItemOffersBatchSlot } from "./offersRateLimit.js";
 import { runRestockCycle } from "./restock.js";
+import { sendPushToTenant } from "../notifications/push.js";
 import {
   type AmazonItemOffer,
   getAmazonItemOffersBatch,
@@ -546,7 +547,56 @@ export function computeRepricingTarget(input: {
   return { status: matchedPrice < input.minPrice ? "at_minimum" : "unchanged", competitorPrice, targetPrice };
 }
 
-async function repriceConnection(connectionId: string, rules: RepricingRule[]) {
+type AutomaticPriceChange = {
+  tenantId: string;
+  sku: string;
+  title?: string;
+  previousPrice: number;
+  newPrice: number;
+};
+
+function shortTitle(change: AutomaticPriceChange) {
+  const title = change.title?.trim() || change.sku;
+  return title.length > 60 ? `${title.slice(0, 57)}...` : title;
+}
+
+function formatUsd(value: number) {
+  return `$${value.toFixed(2)}`;
+}
+
+/**
+ * One push per tenant and cycle: a single change names the product, several
+ * changes are summarized so a busy cycle does not flood the devices.
+ */
+async function notifyAutomaticPriceChanges(changes: AutomaticPriceChange[]) {
+  const changesByTenant = new Map<string, AutomaticPriceChange[]>();
+
+  for (const change of changes) {
+    changesByTenant.set(change.tenantId, [...(changesByTenant.get(change.tenantId) ?? []), change]);
+  }
+
+  for (const [tenantId, tenantChanges] of changesByTenant) {
+    const [first] = tenantChanges;
+    const message = tenantChanges.length === 1
+      ? {
+        title: "Precio ajustado automáticamente",
+        body: `${shortTitle(first)}: ${formatUsd(first.previousPrice)} → ${formatUsd(first.newPrice)}`,
+      }
+      : {
+        title: `${tenantChanges.length} precios ajustados automáticamente`,
+        body: tenantChanges.slice(0, 3).map(shortTitle).join(", ") +
+          (tenantChanges.length > 3 ? ` y ${tenantChanges.length - 3} más` : ""),
+      };
+
+    try {
+      await sendPushToTenant(tenantId, { ...message, data: { screen: "repricing-history" } });
+    } catch (error) {
+      console.error(`Could not send repricing push to tenant ${tenantId}`, error);
+    }
+  }
+}
+
+async function repriceConnection(connectionId: string, rules: RepricingRule[], changes: AutomaticPriceChange[]) {
   const connection = await getAmazonConnection(connectionId);
 
   if (!connection?.sellerId) {
@@ -652,6 +702,14 @@ async function repriceConnection(connectionId: string, rules: RepricingRule[]) {
           // turn that success into a reported failure.
           console.error(`Could not record repricing history for ${rule.sku}`, error);
         }
+
+        changes.push({
+          tenantId: rule.tenantId,
+          sku: rule.sku,
+          title: prepared.title,
+          previousPrice: current.currentPrice,
+          newPrice: decision.targetPrice,
+        });
       } catch (error) {
         await recordRepricingResult(rule, {
           status: "failed",
@@ -680,6 +738,7 @@ export async function runRepricingCycle() {
 
     const rules = await listEnabledRepricingRules();
     const rulesByConnection = new Map<string, RepricingRule[]>();
+    const changes: AutomaticPriceChange[] = [];
 
     for (const rule of rules) {
       rulesByConnection.set(rule.connectionId, [...(rulesByConnection.get(rule.connectionId) ?? []), rule]);
@@ -687,11 +746,13 @@ export async function runRepricingCycle() {
 
     for (const [connectionId, connectionRules] of rulesByConnection) {
       try {
-        await repriceConnection(connectionId, connectionRules);
+        await repriceConnection(connectionId, connectionRules, changes);
       } catch (error) {
         console.error(`Repricing failed for connection ${connectionId}`, error);
       }
     }
+
+    await notifyAutomaticPriceChanges(changes);
   } finally {
     repricingCycleRunning = false;
   }

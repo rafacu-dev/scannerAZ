@@ -85,3 +85,9 @@ test("undercut strategy uses the configured amount", () => {
 
   assert.deepEqual(decision, { status: "unchanged", competitorPrice: 21.5, targetPrice: 18.45 });
 });
+
+test("recognizes Expo push tokens", async () => {
+  const { isExpoPushToken } = await import("../notifications/push.js");
+  assert.equal(isExpoPushToken("ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]"), true);
+  assert.equal(isExpoPushToken("not-a-token"), false);
+});
