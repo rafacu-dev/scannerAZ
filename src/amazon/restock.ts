@@ -1,6 +1,6 @@
 import { assertAmazonSpApiConfig, config } from "../config.js";
 import { getAmazonConnection } from "../storage/connections.js";
-import { getAutomationPool } from "./repricing.js";
+import { getAutomationPool, recordPriceChangeEvent } from "./repricing.js";
 import {
   getLwaAccessToken,
   getSellerListingItem,
@@ -273,6 +273,24 @@ async function restockConnection(connectionId: string, rules: RestockRule[]) {
         patch: prepared.patch
       });
       await recordRestockResult(rule, { status: "restocked", quantity: rule.quantity, restocked: true });
+
+      try {
+        await recordPriceChangeEvent({
+          tenantId: rule.tenantId,
+          connectionId: rule.connectionId,
+          kind: "restock",
+          source: "automatic",
+          sku: rule.sku,
+          asin: prepared.asin,
+          title: prepared.title,
+          imageUrl: prepared.imageUrl,
+          previousQuantity: currentQuantity,
+          newQuantity: rule.quantity,
+        });
+      } catch (error) {
+        // Amazon already accepted the quantity; history is best-effort.
+        console.error(`Could not record restock history for ${rule.sku}`, error);
+      }
     } catch (error) {
       await recordRestockResult(rule, {
         status: "failed",

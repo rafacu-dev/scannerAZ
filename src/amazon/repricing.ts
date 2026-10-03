@@ -46,12 +46,16 @@ export type RepricingStatus = "updated" | "unchanged" | "at_minimum" | "no_compe
 export type RepricingEvent = {
   id: string;
   connectionId: string;
+  kind: RepricingEventKind;
   source: RepricingEventSource;
   sku: string;
   asin?: string;
   title?: string;
+  imageUrl?: string;
   previousPrice?: number;
-  newPrice: number;
+  newPrice?: number;
+  previousQuantity?: number;
+  newQuantity?: number;
   competitorPrice?: number;
   strategy?: RepricingStrategy;
   atMinimum: boolean;
@@ -60,15 +64,22 @@ export type RepricingEvent = {
 
 export type RepricingEventSource = "automatic" | "manual";
 
+/** Price changes and automatic restocks share one history. */
+export type RepricingEventKind = "price" | "restock";
+
 type RepricingEventRow = {
   id: string | number;
   connection_id: string;
+  kind: RepricingEventKind;
   source: RepricingEventSource;
   sku: string;
   asin: string | null;
   title: string | null;
+  image_url: string | null;
   previous_price: string | number | null;
-  new_price: string | number;
+  new_price: string | number | null;
+  previous_quantity: number | null;
+  new_quantity: number | null;
   competitor_price: string | number | null;
   strategy: RepricingStrategy | null;
   at_minimum: boolean;
@@ -182,6 +193,14 @@ export async function initializeRepricingStore() {
       ALTER TABLE scanneraz_repricing_events ALTER COLUMN previous_price DROP NOT NULL;
       ALTER TABLE scanneraz_repricing_events ALTER COLUMN strategy DROP NOT NULL;
 
+      ALTER TABLE scanneraz_repricing_events
+      ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'price';
+
+      ALTER TABLE scanneraz_repricing_events ADD COLUMN IF NOT EXISTS image_url TEXT;
+      ALTER TABLE scanneraz_repricing_events ADD COLUMN IF NOT EXISTS previous_quantity INTEGER;
+      ALTER TABLE scanneraz_repricing_events ADD COLUMN IF NOT EXISTS new_quantity INTEGER;
+      ALTER TABLE scanneraz_repricing_events ALTER COLUMN new_price DROP NOT NULL;
+
       CREATE INDEX IF NOT EXISTS scanneraz_repricing_events_connection_idx
       ON scanneraz_repricing_events (tenant_id, connection_id, created_at DESC);
     `)
@@ -231,12 +250,16 @@ function eventFromRow(row: RepricingEventRow): RepricingEvent {
   return {
     id: String(row.id),
     connectionId: row.connection_id,
+    kind: row.kind,
     source: row.source,
     sku: row.sku,
     asin: row.asin ?? undefined,
     title: row.title ?? undefined,
+    imageUrl: row.image_url ?? undefined,
     previousPrice: optionalNumber(row.previous_price),
-    newPrice: Number(row.new_price),
+    newPrice: optionalNumber(row.new_price),
+    previousQuantity: row.previous_quantity ?? undefined,
+    newQuantity: row.new_quantity ?? undefined,
     competitorPrice: optionalNumber(row.competitor_price),
     strategy: row.strategy ?? undefined,
     atMinimum: row.at_minimum,
@@ -272,12 +295,16 @@ export async function listRepricingEventsForConnection(tenantId: string, connect
 export async function recordPriceChangeEvent(event: {
   tenantId: string;
   connectionId: string;
+  kind?: RepricingEventKind;
   source: RepricingEventSource;
   sku: string;
   asin?: string;
   title?: string;
+  imageUrl?: string;
   previousPrice?: number;
-  newPrice: number;
+  newPrice?: number;
+  previousQuantity?: number;
+  newQuantity?: number;
   competitorPrice?: number;
   strategy?: RepricingStrategy;
   atMinimum?: boolean;
@@ -290,20 +317,24 @@ export async function recordPriceChangeEvent(event: {
     await connectionPool.query(
       `
         INSERT INTO scanneraz_repricing_events (
-          tenant_id, connection_id, source, sku, asin, title, previous_price, new_price,
-          competitor_price, strategy, at_minimum, created_at
+          tenant_id, connection_id, kind, source, sku, asin, title, image_url, previous_price, new_price,
+          previous_quantity, new_quantity, competitor_price, strategy, at_minimum, created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       `,
       [
         event.tenantId,
         event.connectionId,
+        event.kind ?? "price",
         event.source,
         event.sku,
         event.asin ?? null,
         event.title ?? null,
+        event.imageUrl ?? null,
         event.previousPrice ?? null,
-        event.newPrice,
+        event.newPrice ?? null,
+        event.previousQuantity ?? null,
+        event.newQuantity ?? null,
         event.competitorPrice ?? null,
         event.strategy ?? null,
         event.atMinimum ?? false,
@@ -317,12 +348,16 @@ export async function recordPriceChangeEvent(event: {
     id: String(localEvents.length + 1),
     tenantId: event.tenantId,
     connectionId: event.connectionId,
+    kind: event.kind ?? "price",
     source: event.source,
     sku: event.sku,
     asin: event.asin,
     title: event.title,
+    imageUrl: event.imageUrl,
     previousPrice: event.previousPrice,
     newPrice: event.newPrice,
+    previousQuantity: event.previousQuantity,
+    newQuantity: event.newQuantity,
     competitorPrice: event.competitorPrice,
     strategy: event.strategy,
     atMinimum: event.atMinimum ?? false,
@@ -606,6 +641,7 @@ async function repriceConnection(connectionId: string, rules: RepricingRule[]) {
             asin: rule.asin,
             strategy: rule.strategy,
             title: prepared.title,
+            imageUrl: prepared.imageUrl,
             previousPrice: current.currentPrice,
             newPrice: decision.targetPrice,
             competitorPrice: decision.competitorPrice,

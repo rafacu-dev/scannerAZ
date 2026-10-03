@@ -554,7 +554,9 @@ publicAmazonRouter.post("/connections/:connectionId/listings/pricing/match-buy-b
             connectionId,
             source: "manual",
             sku: prepared.sku,
+            asin: prepared.asin,
             title: prepared.title,
+            imageUrl: prepared.imageUrl,
             previousPrice: prepared.currentPrice,
             newPrice: prepared.targetPrice,
           });

@@ -186,6 +186,7 @@ export type PreparedListingPriceUpdate = {
   sku: string;
   asin?: string;
   title?: string;
+  imageUrl?: string;
   productType: string;
   currentPrice?: number;
   targetPrice: number;
@@ -1040,6 +1041,7 @@ export function prepareListingPriceUpdate(
     sku,
     asin: stringValue(summary?.asin),
     title: stringValue(summary?.itemName) ?? stringValue(summary?.item_name),
+    imageUrl: listingSummaryImage(summary),
     productType,
     currentPrice,
     targetPrice,
@@ -1057,7 +1059,9 @@ export function prepareListingPriceUpdate(
 
 export type PreparedListingRestock = {
   sku: string;
+  asin?: string;
   title?: string;
+  imageUrl?: string;
   productType: string;
   /** Only merchant-fulfilled (FBM) quantity can be written through Listings Items. */
   fulfillment: "merchant" | "amazon" | "unknown";
@@ -1110,7 +1114,9 @@ export function prepareListingRestock(
 
   return {
     sku,
+    asin: stringValue(summary?.asin),
     title: stringValue(summary?.itemName) ?? stringValue(summary?.item_name),
+    imageUrl: listingSummaryImage(summary),
     productType,
     fulfillment,
     currentQuantity,
@@ -1437,6 +1443,11 @@ function recordArray(value: unknown) {
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function listingSummaryImage(summary: Record<string, unknown> | undefined) {
+  const image = asRecord(recordValue(summary, ["mainImage", "main_image"]));
+  return stringValue(recordValue(image, ["link"]));
 }
 
 function listingProductType(value: unknown, marketplaceId: string) {
