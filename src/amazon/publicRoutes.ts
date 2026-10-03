@@ -30,7 +30,12 @@ import {
   searchSellerListings
 } from "./spapi.js";
 import { withItemOffersBatchSlot } from "./offersRateLimit.js";
-import { defaultRepricingUndercut, listRepricingRulesForConnection, saveRepricingRule } from "./repricing.js";
+import {
+  defaultRepricingUndercut,
+  listRepricingEventsForConnection,
+  listRepricingRulesForConnection,
+  saveRepricingRule
+} from "./repricing.js";
 
 export const publicAmazonRouter = express.Router();
 
@@ -682,6 +687,31 @@ publicAmazonRouter.get("/connections/:connectionId/repricing/rules", async (req,
       connectionId,
       priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED,
       rules: await listRepricingRulesForConnection(tenantId, connectionId),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+publicAmazonRouter.get("/connections/:connectionId/repricing/history", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const requestedLimit = Number(req.query.limit ?? 100);
+    const limit = Number.isInteger(requestedLimit) && requestedLimit >= 1 && requestedLimit <= 500
+      ? requestedLimit
+      : 100;
+
+    res.json({
+      connectionId,
+      events: await listRepricingEventsForConnection(tenantId, connectionId, limit),
     });
   } catch (error) {
     next(error);

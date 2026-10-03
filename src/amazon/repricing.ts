@@ -38,6 +38,35 @@ export type RepricingStrategy = "match" | "undercut";
 
 export type RepricingStatus = "updated" | "unchanged" | "at_minimum" | "no_competitors" | "failed";
 
+/** One price change the automatic repricer submitted to Amazon. */
+export type RepricingEvent = {
+  id: string;
+  connectionId: string;
+  sku: string;
+  asin: string;
+  title?: string;
+  previousPrice: number;
+  newPrice: number;
+  competitorPrice?: number;
+  strategy: RepricingStrategy;
+  atMinimum: boolean;
+  createdAt: string;
+};
+
+type RepricingEventRow = {
+  id: string | number;
+  connection_id: string;
+  sku: string;
+  asin: string;
+  title: string | null;
+  previous_price: string | number;
+  new_price: string | number;
+  competitor_price: string | number | null;
+  strategy: RepricingStrategy;
+  at_minimum: boolean;
+  created_at: Date | string;
+};
+
 type RepricingRuleRow = {
   tenant_id: string;
   connection_id: string;
@@ -61,6 +90,7 @@ type RepricingRuleRow = {
 const repricingMinimumIntervalMs = 4 * 60 * 1000;
 let lastRepricingCycleStartedAt = 0;
 const localRules = new Map<string, RepricingRule>();
+const localEvents: Array<RepricingEvent & { tenantId: string }> = [];
 let pool: Pool | undefined;
 let schemaPromise: Promise<void> | undefined;
 let repricingCycleRunning = false;
@@ -114,6 +144,24 @@ export async function initializeRepricingStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_repricing_rules_enabled_idx
       ON scanneraz_repricing_rules (enabled, connection_id);
+
+      CREATE TABLE IF NOT EXISTS scanneraz_repricing_events (
+        id BIGSERIAL PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        asin TEXT NOT NULL,
+        title TEXT,
+        previous_price NUMERIC(12, 2) NOT NULL,
+        new_price NUMERIC(12, 2) NOT NULL,
+        competitor_price NUMERIC(12, 2),
+        strategy TEXT NOT NULL,
+        at_minimum BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_repricing_events_connection_idx
+      ON scanneraz_repricing_events (tenant_id, connection_id, created_at DESC);
     `)
     .then(() => undefined)
     .catch((error: unknown) => {
@@ -155,6 +203,99 @@ function assertLocalStoreAllowed() {
 
 function localKey(connectionId: string, sku: string) {
   return `${connectionId}\u0000${sku}`;
+}
+
+function eventFromRow(row: RepricingEventRow): RepricingEvent {
+  return {
+    id: String(row.id),
+    connectionId: row.connection_id,
+    sku: row.sku,
+    asin: row.asin,
+    title: row.title ?? undefined,
+    previousPrice: Number(row.previous_price),
+    newPrice: Number(row.new_price),
+    competitorPrice: optionalNumber(row.competitor_price),
+    strategy: row.strategy,
+    atMinimum: row.at_minimum,
+    createdAt: new Date(row.created_at).toISOString(),
+  };
+}
+
+export async function listRepricingEventsForConnection(tenantId: string, connectionId: string, limit = 100) {
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await initializeRepricingStore();
+    const result = await connectionPool.query<RepricingEventRow>(
+      `
+        SELECT * FROM scanneraz_repricing_events
+        WHERE tenant_id = $1 AND connection_id = $2
+        ORDER BY created_at DESC, id DESC
+        LIMIT $3
+      `,
+      [tenantId, connectionId, limit]
+    );
+    return result.rows.map(eventFromRow);
+  }
+
+  assertLocalStoreAllowed();
+  return localEvents
+    .filter((event) => event.tenantId === tenantId && event.connectionId === connectionId)
+    .slice(-limit)
+    .reverse()
+    .map(({ tenantId: _tenantId, ...event }) => event);
+}
+
+async function recordRepricingEvent(rule: RepricingRule, event: {
+  title?: string;
+  previousPrice: number;
+  newPrice: number;
+  competitorPrice?: number;
+  atMinimum: boolean;
+}) {
+  const createdAt = new Date().toISOString();
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await connectionPool.query(
+      `
+        INSERT INTO scanneraz_repricing_events (
+          tenant_id, connection_id, sku, asin, title, previous_price, new_price,
+          competitor_price, strategy, at_minimum, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `,
+      [
+        rule.tenantId,
+        rule.connectionId,
+        rule.sku,
+        rule.asin,
+        event.title ?? null,
+        event.previousPrice,
+        event.newPrice,
+        event.competitorPrice ?? null,
+        rule.strategy,
+        event.atMinimum,
+        createdAt
+      ]
+    );
+    return;
+  }
+
+  localEvents.push({
+    id: String(localEvents.length + 1),
+    tenantId: rule.tenantId,
+    connectionId: rule.connectionId,
+    sku: rule.sku,
+    asin: rule.asin,
+    title: event.title,
+    previousPrice: event.previousPrice,
+    newPrice: event.newPrice,
+    competitorPrice: event.competitorPrice,
+    strategy: rule.strategy,
+    atMinimum: event.atMinimum,
+    createdAt,
+  });
 }
 
 export async function listRepricingRulesForConnection(tenantId: string, connectionId: string) {
@@ -423,6 +564,20 @@ async function repriceConnection(connectionId: string, rules: RepricingRule[]) {
           competitorPrice: decision.competitorPrice,
           price: decision.targetPrice,
         });
+
+        try {
+          await recordRepricingEvent(rule, {
+            title: prepared.title,
+            previousPrice: current.currentPrice,
+            newPrice: decision.targetPrice,
+            competitorPrice: decision.competitorPrice,
+            atMinimum: decision.status === "at_minimum",
+          });
+        } catch (error) {
+          // The price already changed on Amazon; a history write must not
+          // turn that success into a reported failure.
+          console.error(`Could not record repricing history for ${rule.sku}`, error);
+        }
       } catch (error) {
         await recordRepricingResult(rule, {
           status: "failed",
