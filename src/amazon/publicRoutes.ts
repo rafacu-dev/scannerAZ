@@ -29,6 +29,8 @@ import {
   searchCatalogItems,
   searchSellerListings
 } from "./spapi.js";
+import { withItemOffersBatchSlot } from "./offersRateLimit.js";
+import { listRepricingRulesForConnection, saveRepricingRule } from "./repricing.js";
 
 export const publicAmazonRouter = express.Router();
 
@@ -54,7 +56,6 @@ const itemOffersCacheTtlMs = 90_000;
 const sellerStoreNameCache = new Map<string, { expiresAt: number; value?: string }>();
 const sellerStoreNameCacheTtlMs = 6 * 60 * 60 * 1000;
 const sellerStoreNameFailureCacheTtlMs = 5 * 60 * 1000;
-let nextItemOffersBatchStartAt = 0;
 const releaseCalendarCache = new Map<string, { expiresAt: number; value: unknown }>();
 const releaseCalendarCacheTtlMs = 5 * 60 * 1000;
 const releaseCalendarLookbackDays = 90;
@@ -666,6 +667,77 @@ publicAmazonRouter.get("/connections/:connectionId/finances/release-calendar", a
   }
 });
 
+publicAmazonRouter.get("/connections/:connectionId/repricing/rules", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    res.json({
+      connectionId,
+      priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED,
+      rules: await listRepricingRulesForConnection(tenantId, connectionId),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Save the automatic repricing rule for one SKU. The background repricer
+ * matches the lowest competing offer and never goes below minPrice.
+ */
+publicAmazonRouter.put("/connections/:connectionId/repricing/rules/:sku", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const sku = String(req.params.sku ?? "").trim();
+    const asin = String(req.body?.asin ?? "").trim().toUpperCase();
+    const minPrice = Number(req.body?.minPrice);
+    const enabled = req.body?.enabled === true;
+
+    if (!sku || sku.length > 200) {
+      res.status(400).json({ error: "sku is invalid" });
+      return;
+    }
+
+    if (!/^[A-Z0-9]{10}$/.test(asin)) {
+      res.status(400).json({ error: "asin is invalid" });
+      return;
+    }
+
+    if (!Number.isFinite(minPrice) || minPrice <= 0 || minPrice > 100000) {
+      res.status(400).json({ error: "minPrice must be greater than 0" });
+      return;
+    }
+
+    const rule = await saveRepricingRule({
+      tenantId,
+      connectionId,
+      sku,
+      asin,
+      enabled,
+      minPrice: Math.round(minPrice * 100) / 100,
+    });
+
+    res.json({ priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED, rule });
+  } catch (error) {
+    next(error);
+  }
+});
+
 publicAmazonRouter.delete("/connections/:connectionId", async (req, res, next) => {
   try {
     const tenantId = requireTenantId(req);
@@ -916,21 +988,6 @@ async function getCachedAmazonSellerStoreName(input: {
     });
     return undefined;
   }
-}
-
-async function withItemOffersBatchSlot<T>(request: () => Promise<T>) {
-  // getCompetitiveSummary has a conservative default rate of 0.033 request/second.
-  // The short cache above normally makes this delay invisible, but this keeps
-  // parallel mobile refreshes from turning into a stream of 429 responses.
-  const now = Date.now();
-  const startAt = Math.max(now, nextItemOffersBatchStartAt);
-  nextItemOffersBatchStartAt = startAt + 30_000;
-
-  if (startAt > now) {
-    await delay(startAt - now);
-  }
-
-  return request();
 }
 
 function emptyItemOffersResult(asin: string) {

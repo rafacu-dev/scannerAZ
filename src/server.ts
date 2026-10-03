@@ -17,6 +17,7 @@ import {
   getAmazonAuthorizationUrl
 } from "./amazon/oauth.js";
 import { publicAmazonRouter } from "./amazon/publicRoutes.js";
+import { initializeRepricingStore, triggerRepricingCycle } from "./amazon/repricing.js";
 import { amazonRouter } from "./amazon/routes.js";
 import { inventoryRouter } from "./inventory/routes.js";
 import { initializeInventoryStore } from "./inventory/store.js";
@@ -296,6 +297,18 @@ app.use(express.static(publicDir));
 
 app.get("/", (_req, res) => {
   res.sendFile(path.join(publicDir, "index.html"));
+});
+
+// Called by the external scheduler (about every 5 minutes). It only starts a
+// cycle over saved rules; the cycle itself enforces a minimum interval.
+app.all("/jobs/repricing/run", (req, res) => {
+  if (req.method !== "GET" && req.method !== "POST") {
+    res.status(405).end();
+    return;
+  }
+
+  const result = triggerRepricingCycle();
+  res.status(result.status === "started" ? 202 : 200).json(result);
 });
 
 app.use("/api/keepa", keepaRouter);
@@ -685,7 +698,7 @@ void startServer();
 async function startServer() {
   try {
     await initializeAccountStore();
-    await Promise.all([initializeAmazonConnectionStore(), initializeInventoryStore()]);
+    await Promise.all([initializeAmazonConnectionStore(), initializeInventoryStore(), initializeRepricingStore()]);
     app.listen(config.PORT, () => {
       console.log(`ScannerAz listening at ${config.APP_BASE_URL}`);
     });

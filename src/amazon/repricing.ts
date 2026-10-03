@@ -1,0 +1,447 @@
+import { Pool } from "pg";
+import { assertAmazonSpApiConfig, config } from "../config.js";
+import { getAmazonConnection } from "../storage/connections.js";
+import { withItemOffersBatchSlot } from "./offersRateLimit.js";
+import {
+  type AmazonItemOffer,
+  getAmazonItemOffersBatch,
+  getLwaAccessToken,
+  getSellerListingItem,
+  normalizeAmazonItemOffersBatch,
+  patchSellerListingPrice,
+  prepareListingPriceUpdate
+} from "./spapi.js";
+
+/**
+ * A seller-defined automatic repricing rule for one SKU. ScannerAz stays a
+ * fixed amount below the lowest competing offer, following it both down and
+ * up, and never prices below the seller's minimum.
+ */
+export type RepricingRule = {
+  tenantId: string;
+  connectionId: string;
+  sku: string;
+  asin: string;
+  enabled: boolean;
+  minPrice: number;
+  updatedAt: string;
+  lastCheckedAt?: string;
+  lastStatus?: RepricingStatus;
+  lastMessage?: string;
+  lastCompetitorPrice?: number;
+  lastPrice?: number;
+};
+
+export type RepricingStatus = "updated" | "unchanged" | "at_minimum" | "no_competitors" | "failed";
+
+type RepricingRuleRow = {
+  tenant_id: string;
+  connection_id: string;
+  sku: string;
+  asin: string;
+  enabled: boolean;
+  min_price: string | number;
+  updated_at: Date | string;
+  last_checked_at: Date | string | null;
+  last_status: RepricingStatus | null;
+  last_message: string | null;
+  last_competitor_price: string | number | null;
+  last_price: string | number | null;
+};
+
+// The external worker is expected to call the trigger about every 5 minutes.
+// Calls arriving sooner are ignored, so the unauthenticated endpoint cannot be
+// used to run more cycles (or Amazon requests) than that schedule allows.
+const repricingMinimumIntervalMs = 4 * 60 * 1000;
+let lastRepricingCycleStartedAt = 0;
+const localRules = new Map<string, RepricingRule>();
+let pool: Pool | undefined;
+let schemaPromise: Promise<void> | undefined;
+let repricingCycleRunning = false;
+
+function getPool() {
+  if (!config.DATABASE_URL) {
+    return undefined;
+  }
+
+  if (!pool) {
+    pool = new Pool({
+      connectionString: config.DATABASE_URL,
+      ssl: config.DATABASE_SSL ? { rejectUnauthorized: true } : undefined
+    });
+  }
+
+  return pool;
+}
+
+export async function initializeRepricingStore() {
+  const connectionPool = getPool();
+
+  if (!connectionPool || schemaPromise) {
+    return schemaPromise;
+  }
+
+  schemaPromise = connectionPool
+    .query(`
+      CREATE TABLE IF NOT EXISTS scanneraz_repricing_rules (
+        tenant_id TEXT NOT NULL,
+        connection_id TEXT NOT NULL,
+        sku TEXT NOT NULL,
+        asin TEXT NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        min_price NUMERIC(12, 2) NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        last_checked_at TIMESTAMPTZ,
+        last_status TEXT,
+        last_message TEXT,
+        last_competitor_price NUMERIC(12, 2),
+        last_price NUMERIC(12, 2),
+        PRIMARY KEY (connection_id, sku)
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_repricing_rules_enabled_idx
+      ON scanneraz_repricing_rules (enabled, connection_id);
+    `)
+    .then(() => undefined)
+    .catch((error: unknown) => {
+      schemaPromise = undefined;
+      throw error;
+    });
+
+  return schemaPromise;
+}
+
+function optionalNumber(value: string | number | null) {
+  return value === null ? undefined : Number(value);
+}
+
+function fromRow(row: RepricingRuleRow): RepricingRule {
+  return {
+    tenantId: row.tenant_id,
+    connectionId: row.connection_id,
+    sku: row.sku,
+    asin: row.asin,
+    enabled: row.enabled,
+    minPrice: Number(row.min_price),
+    updatedAt: new Date(row.updated_at).toISOString(),
+    lastCheckedAt: row.last_checked_at ? new Date(row.last_checked_at).toISOString() : undefined,
+    lastStatus: row.last_status ?? undefined,
+    lastMessage: row.last_message ?? undefined,
+    lastCompetitorPrice: optionalNumber(row.last_competitor_price),
+    lastPrice: optionalNumber(row.last_price),
+  };
+}
+
+function assertLocalStoreAllowed() {
+  if (config.NODE_ENV === "production") {
+    throw new Error("Repricing rules require DATABASE_URL in production.");
+  }
+}
+
+function localKey(connectionId: string, sku: string) {
+  return `${connectionId}\u0000${sku}`;
+}
+
+export async function listRepricingRulesForConnection(tenantId: string, connectionId: string) {
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await initializeRepricingStore();
+    const result = await connectionPool.query<RepricingRuleRow>(
+      `SELECT * FROM scanneraz_repricing_rules WHERE tenant_id = $1 AND connection_id = $2 ORDER BY sku`,
+      [tenantId, connectionId]
+    );
+    return result.rows.map(fromRow);
+  }
+
+  assertLocalStoreAllowed();
+  return [...localRules.values()].filter((rule) => rule.tenantId === tenantId && rule.connectionId === connectionId);
+}
+
+export async function saveRepricingRule(input: {
+  tenantId: string;
+  connectionId: string;
+  sku: string;
+  asin: string;
+  enabled: boolean;
+  minPrice: number;
+}) {
+  const updatedAt = new Date().toISOString();
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await initializeRepricingStore();
+    const result = await connectionPool.query<RepricingRuleRow>(
+      `
+        INSERT INTO scanneraz_repricing_rules (tenant_id, connection_id, sku, asin, enabled, min_price, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (connection_id, sku) DO UPDATE SET
+          asin = EXCLUDED.asin,
+          enabled = EXCLUDED.enabled,
+          min_price = EXCLUDED.min_price,
+          updated_at = EXCLUDED.updated_at
+        WHERE scanneraz_repricing_rules.tenant_id = EXCLUDED.tenant_id
+        RETURNING *
+      `,
+      [input.tenantId, input.connectionId, input.sku, input.asin, input.enabled, input.minPrice, updatedAt]
+    );
+
+    if (!result.rows[0]) {
+      throw new Error("Repricing rule belongs to another tenant");
+    }
+
+    return fromRow(result.rows[0]);
+  }
+
+  assertLocalStoreAllowed();
+  const key = localKey(input.connectionId, input.sku);
+  const rule: RepricingRule = { ...localRules.get(key), ...input, updatedAt };
+  localRules.set(key, rule);
+  return rule;
+}
+
+async function listEnabledRepricingRules() {
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await initializeRepricingStore();
+    const result = await connectionPool.query<RepricingRuleRow>(
+      `SELECT * FROM scanneraz_repricing_rules WHERE enabled ORDER BY connection_id, sku`
+    );
+    return result.rows.map(fromRow);
+  }
+
+  return config.NODE_ENV === "production" ? [] : [...localRules.values()].filter((rule) => rule.enabled);
+}
+
+async function recordRepricingResult(rule: RepricingRule, result: {
+  status: RepricingStatus;
+  message?: string;
+  competitorPrice?: number;
+  price?: number;
+}) {
+  const checkedAt = new Date().toISOString();
+  const connectionPool = getPool();
+
+  if (connectionPool) {
+    await connectionPool.query(
+      `
+        UPDATE scanneraz_repricing_rules SET
+          last_checked_at = $3,
+          last_status = $4,
+          last_message = $5,
+          last_competitor_price = $6,
+          last_price = $7
+        WHERE connection_id = $1 AND sku = $2
+      `,
+      [rule.connectionId, rule.sku, checkedAt, result.status, result.message ?? null, result.competitorPrice ?? null, result.price ?? null]
+    );
+    return;
+  }
+
+  const key = localKey(rule.connectionId, rule.sku);
+  const current = localRules.get(key);
+
+  if (current) {
+    localRules.set(key, {
+      ...current,
+      lastCheckedAt: checkedAt,
+      lastStatus: result.status,
+      lastMessage: result.message,
+      lastCompetitorPrice: result.competitorPrice,
+      lastPrice: result.price,
+    });
+  }
+}
+
+export const repricingUndercut = 0.1;
+
+function roundPrice(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * Picks the listing price that sits repricingUndercut below the lowest
+ * competing offer in the same condition. The same rule applies when the
+ * competitor lowers or raises its price, so the result is stable between runs. Competitor prices are compared as landed prices (item plus
+ * shipping), so the seller's own shipping charge is subtracted from the
+ * target. The result never goes below the seller's minimum.
+ */
+export function computeRepricingTarget(input: {
+  offers: AmazonItemOffer[];
+  ownSellerId?: string;
+  currentPrice: number;
+  minPrice: number;
+}): { status: Exclude<RepricingStatus, "updated" | "failed">; competitorPrice?: number; targetPrice?: number } {
+  const ownSellerId = input.ownSellerId?.trim().toUpperCase();
+  const ownOffer = input.offers.find((offer) => offer.sellerId?.trim().toUpperCase() === ownSellerId);
+  const ownShipping = ownOffer?.landedPrice !== undefined && ownOffer.listingPrice !== undefined
+    ? Math.max(0, ownOffer.landedPrice - ownOffer.listingPrice)
+    : 0;
+  const ownCondition = ownOffer?.condition?.trim().toLowerCase();
+  const competitorPrices = input.offers.flatMap((offer) => {
+    const sellerId = offer.sellerId?.trim().toUpperCase();
+    const condition = offer.condition?.trim().toLowerCase();
+
+    if (!sellerId || sellerId === ownSellerId || (ownCondition && condition && condition !== ownCondition)) {
+      return [];
+    }
+
+    const price = offer.landedPrice ?? (offer.listingPrice === undefined
+      ? undefined
+      : offer.listingPrice + (offer.shippingPrice ?? 0));
+
+    return price !== undefined && Number.isFinite(price) && price > 0 ? [price] : [];
+  });
+
+  if (!competitorPrices.length) {
+    return { status: "no_competitors" };
+  }
+
+  const competitorPrice = roundPrice(Math.min(...competitorPrices));
+  const matchedPrice = roundPrice(competitorPrice - ownShipping - repricingUndercut);
+  const targetPrice = roundPrice(Math.max(matchedPrice, input.minPrice));
+
+  return { status: matchedPrice < input.minPrice ? "at_minimum" : "unchanged", competitorPrice, targetPrice };
+}
+
+async function repriceConnection(connectionId: string, rules: RepricingRule[]) {
+  const connection = await getAmazonConnection(connectionId);
+
+  if (!connection?.sellerId) {
+    for (const rule of rules) {
+      await recordRepricingResult(rule, { status: "failed", message: "La conexión de Amazon ya no está disponible." });
+    }
+    return;
+  }
+
+  assertAmazonSpApiConfig(connection.refreshToken);
+  const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+  const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+  const ownedRules = rules.filter((rule) => rule.tenantId === connection.tenantId);
+
+  for (let index = 0; index < ownedRules.length; index += 20) {
+    const chunk = ownedRules.slice(index, index + 20);
+    const asins = [...new Set(chunk.map((rule) => rule.asin))];
+    const response = await withItemOffersBatchSlot(() => getAmazonItemOffersBatch({
+      asins,
+      refreshToken: connection.refreshToken,
+      accessToken,
+      marketplaceId
+    }));
+    const offersByAsin = new Map(normalizeAmazonItemOffersBatch(response, asins).map((offers) => [offers.asin, offers]));
+
+    for (const rule of chunk) {
+      try {
+        const offers = offersByAsin.get(rule.asin);
+
+        if (!offers || offers.error) {
+          await recordRepricingResult(rule, { status: "failed", message: offers?.error ?? "Amazon no devolvió ofertas." });
+          continue;
+        }
+
+        // Listings Items allows 5 requests per second; reads and writes are paced.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        const rawListing = await getSellerListingItem({
+          sellerId: connection.sellerId,
+          sku: rule.sku,
+          refreshToken: connection.refreshToken,
+          accessToken,
+          marketplaceId
+        });
+        const current = prepareListingPriceUpdate(rawListing, marketplaceId, rule.minPrice);
+
+        if (current.currentPrice === undefined) {
+          await recordRepricingResult(rule, { status: "failed", message: "Amazon no devolvió el precio actual del SKU." });
+          continue;
+        }
+
+        const decision = computeRepricingTarget({
+          offers: offers.offers,
+          ownSellerId: connection.sellerId,
+          currentPrice: current.currentPrice,
+          minPrice: rule.minPrice,
+        });
+
+        if (decision.targetPrice === undefined || Math.abs(decision.targetPrice - current.currentPrice) <= 0.005) {
+          await recordRepricingResult(rule, {
+            status: decision.status,
+            competitorPrice: decision.competitorPrice,
+            price: current.currentPrice,
+          });
+          continue;
+        }
+
+        const prepared = prepareListingPriceUpdate(rawListing, marketplaceId, decision.targetPrice);
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        await patchSellerListingPrice({
+          sellerId: connection.sellerId,
+          sku: rule.sku,
+          refreshToken: connection.refreshToken,
+          accessToken,
+          marketplaceId,
+          patch: prepared.patch
+        });
+        await recordRepricingResult(rule, {
+          status: "updated",
+          message: decision.status === "at_minimum" ? "Ajustado a tu precio mínimo." : undefined,
+          competitorPrice: decision.competitorPrice,
+          price: decision.targetPrice,
+        });
+      } catch (error) {
+        await recordRepricingResult(rule, {
+          status: "failed",
+          message: error instanceof Error ? error.message.slice(0, 500) : "No pude repreciar este SKU.",
+        });
+      }
+    }
+  }
+}
+
+export async function runRepricingCycle() {
+  if (repricingCycleRunning || !config.SCANNERAZ_PRICE_UPDATES_ENABLED) {
+    return;
+  }
+
+  repricingCycleRunning = true;
+
+  try {
+    const rules = await listEnabledRepricingRules();
+    const rulesByConnection = new Map<string, RepricingRule[]>();
+
+    for (const rule of rules) {
+      rulesByConnection.set(rule.connectionId, [...(rulesByConnection.get(rule.connectionId) ?? []), rule]);
+    }
+
+    for (const [connectionId, connectionRules] of rulesByConnection) {
+      try {
+        await repriceConnection(connectionId, connectionRules);
+      } catch (error) {
+        console.error(`Repricing failed for connection ${connectionId}`, error);
+      }
+    }
+  } finally {
+    repricingCycleRunning = false;
+  }
+}
+
+export function triggerRepricingCycle() {
+  if (!config.SCANNERAZ_PRICE_UPDATES_ENABLED) {
+    return { status: "disabled" as const };
+  }
+
+  if (repricingCycleRunning) {
+    return { status: "running" as const };
+  }
+
+  const now = Date.now();
+  const nextAllowedAt = lastRepricingCycleStartedAt + repricingMinimumIntervalMs;
+
+  if (now < nextAllowedAt) {
+    return { status: "too_soon" as const, retryAfterSeconds: Math.ceil((nextAllowedAt - now) / 1000) };
+  }
+
+  lastRepricingCycleStartedAt = now;
+  void runRepricingCycle().catch((error) => console.error("Repricing cycle failed", error));
+  return { status: "started" as const };
+}
