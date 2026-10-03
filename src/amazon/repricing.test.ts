@@ -14,6 +14,8 @@ test("stays 10 cents below the lowest competitor landed price net of own shippin
     ownSellerId: "own",
     currentPrice: 20,
     minPrice: 10,
+    strategy: "undercut",
+    undercutAmount: 0.1,
   });
 
   assert.deepEqual(decision, { status: "unchanged", competitorPrice: 21.5, targetPrice: 18.4 });
@@ -25,6 +27,8 @@ test("never goes below the seller minimum", () => {
     ownSellerId: "OWN",
     currentPrice: 20,
     minPrice: 15,
+    strategy: "undercut",
+    undercutAmount: 0.1,
   });
 
   assert.deepEqual(decision, { status: "at_minimum", competitorPrice: 12, targetPrice: 15 });
@@ -36,6 +40,8 @@ test("ignores other conditions and reports when there is no competitor", () => {
     ownSellerId: "OWN",
     currentPrice: 20,
     minPrice: 1,
+    strategy: "undercut",
+    undercutAmount: 0.1,
   });
 
   assert.deepEqual(decision, { status: "no_competitors" });
@@ -47,7 +53,35 @@ test("follows a competitor price increase while staying 10 cents below", () => {
     ownSellerId: "OWN",
     currentPrice: 18.9,
     minPrice: 15,
+    strategy: "undercut",
+    undercutAmount: 0.1,
   });
 
   assert.deepEqual(decision, { status: "unchanged", competitorPrice: 21, targetPrice: 20.9 });
+});
+
+test("match strategy equals the lowest competitor exactly", () => {
+  const decision = computeRepricingTarget({
+    offers: [own, { sellerId: "A", fulfillment: "FBA", condition: "new", landedPrice: 21.5 }],
+    ownSellerId: "OWN",
+    currentPrice: 20,
+    minPrice: 10,
+    strategy: "match",
+    undercutAmount: 0.05,
+  });
+
+  assert.deepEqual(decision, { status: "unchanged", competitorPrice: 21.5, targetPrice: 18.5 });
+});
+
+test("undercut strategy uses the configured amount", () => {
+  const decision = computeRepricingTarget({
+    offers: [own, { sellerId: "A", fulfillment: "FBA", condition: "new", landedPrice: 21.5 }],
+    ownSellerId: "OWN",
+    currentPrice: 20,
+    minPrice: 10,
+    strategy: "undercut",
+    undercutAmount: 0.05,
+  });
+
+  assert.deepEqual(decision, { status: "unchanged", competitorPrice: 21.5, targetPrice: 18.45 });
 });

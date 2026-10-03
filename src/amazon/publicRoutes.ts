@@ -30,7 +30,7 @@ import {
   searchSellerListings
 } from "./spapi.js";
 import { withItemOffersBatchSlot } from "./offersRateLimit.js";
-import { listRepricingRulesForConnection, saveRepricingRule } from "./repricing.js";
+import { defaultRepricingUndercut, listRepricingRulesForConnection, saveRepricingRule } from "./repricing.js";
 
 export const publicAmazonRouter = express.Router();
 
@@ -707,6 +707,10 @@ publicAmazonRouter.put("/connections/:connectionId/repricing/rules/:sku", async 
     const asin = String(req.body?.asin ?? "").trim().toUpperCase();
     const minPrice = Number(req.body?.minPrice);
     const enabled = req.body?.enabled === true;
+    const strategy = req.body?.strategy === "match" ? "match" : "undercut";
+    const undercutAmount = req.body?.undercutAmount === undefined
+      ? defaultRepricingUndercut
+      : Number(req.body.undercutAmount);
 
     if (!sku || sku.length > 200) {
       res.status(400).json({ error: "sku is invalid" });
@@ -723,6 +727,11 @@ publicAmazonRouter.put("/connections/:connectionId/repricing/rules/:sku", async 
       return;
     }
 
+    if (strategy === "undercut" && (!Number.isFinite(undercutAmount) || undercutAmount < 0.01 || undercutAmount > 1000)) {
+      res.status(400).json({ error: "undercutAmount must be at least 0.01" });
+      return;
+    }
+
     const rule = await saveRepricingRule({
       tenantId,
       connectionId,
@@ -730,6 +739,8 @@ publicAmazonRouter.put("/connections/:connectionId/repricing/rules/:sku", async 
       asin,
       enabled,
       minPrice: Math.round(minPrice * 100) / 100,
+      strategy,
+      undercutAmount: Math.round((strategy === "undercut" ? undercutAmount : defaultRepricingUndercut) * 100) / 100,
     });
 
     res.json({ priceUpdatesEnabled: config.SCANNERAZ_PRICE_UPDATES_ENABLED, rule });

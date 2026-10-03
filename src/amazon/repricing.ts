@@ -13,9 +13,9 @@ import {
 } from "./spapi.js";
 
 /**
- * A seller-defined automatic repricing rule for one SKU. ScannerAz stays a
- * fixed amount below the lowest competing offer, following it both down and
- * up, and never prices below the seller's minimum.
+ * A seller-defined automatic repricing rule for one SKU. ScannerAz either
+ * matches the lowest competing offer or stays undercutAmount below it,
+ * following it both down and up, and never prices below the seller's minimum.
  */
 export type RepricingRule = {
   tenantId: string;
@@ -24,6 +24,8 @@ export type RepricingRule = {
   asin: string;
   enabled: boolean;
   minPrice: number;
+  strategy: RepricingStrategy;
+  undercutAmount: number;
   updatedAt: string;
   lastCheckedAt?: string;
   lastStatus?: RepricingStatus;
@@ -31,6 +33,8 @@ export type RepricingRule = {
   lastCompetitorPrice?: number;
   lastPrice?: number;
 };
+
+export type RepricingStrategy = "match" | "undercut";
 
 export type RepricingStatus = "updated" | "unchanged" | "at_minimum" | "no_competitors" | "failed";
 
@@ -41,6 +45,8 @@ type RepricingRuleRow = {
   asin: string;
   enabled: boolean;
   min_price: string | number;
+  strategy: RepricingStrategy;
+  undercut_amount: string | number;
   updated_at: Date | string;
   last_checked_at: Date | string | null;
   last_status: RepricingStatus | null;
@@ -99,6 +105,13 @@ export async function initializeRepricingStore() {
         PRIMARY KEY (connection_id, sku)
       );
 
+      -- Rules saved before the strategy choice kept a fixed $0.10 undercut.
+      ALTER TABLE scanneraz_repricing_rules
+      ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'undercut';
+
+      ALTER TABLE scanneraz_repricing_rules
+      ADD COLUMN IF NOT EXISTS undercut_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.10;
+
       CREATE INDEX IF NOT EXISTS scanneraz_repricing_rules_enabled_idx
       ON scanneraz_repricing_rules (enabled, connection_id);
     `)
@@ -123,6 +136,8 @@ function fromRow(row: RepricingRuleRow): RepricingRule {
     asin: row.asin,
     enabled: row.enabled,
     minPrice: Number(row.min_price),
+    strategy: row.strategy,
+    undercutAmount: Number(row.undercut_amount),
     updatedAt: new Date(row.updated_at).toISOString(),
     lastCheckedAt: row.last_checked_at ? new Date(row.last_checked_at).toISOString() : undefined,
     lastStatus: row.last_status ?? undefined,
@@ -165,6 +180,8 @@ export async function saveRepricingRule(input: {
   asin: string;
   enabled: boolean;
   minPrice: number;
+  strategy: RepricingStrategy;
+  undercutAmount: number;
 }) {
   const updatedAt = new Date().toISOString();
   const connectionPool = getPool();
@@ -173,17 +190,30 @@ export async function saveRepricingRule(input: {
     await initializeRepricingStore();
     const result = await connectionPool.query<RepricingRuleRow>(
       `
-        INSERT INTO scanneraz_repricing_rules (tenant_id, connection_id, sku, asin, enabled, min_price, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO scanneraz_repricing_rules
+          (tenant_id, connection_id, sku, asin, enabled, min_price, strategy, undercut_amount, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (connection_id, sku) DO UPDATE SET
           asin = EXCLUDED.asin,
           enabled = EXCLUDED.enabled,
           min_price = EXCLUDED.min_price,
+          strategy = EXCLUDED.strategy,
+          undercut_amount = EXCLUDED.undercut_amount,
           updated_at = EXCLUDED.updated_at
         WHERE scanneraz_repricing_rules.tenant_id = EXCLUDED.tenant_id
         RETURNING *
       `,
-      [input.tenantId, input.connectionId, input.sku, input.asin, input.enabled, input.minPrice, updatedAt]
+      [
+        input.tenantId,
+        input.connectionId,
+        input.sku,
+        input.asin,
+        input.enabled,
+        input.minPrice,
+        input.strategy,
+        input.undercutAmount,
+        updatedAt
+      ]
     );
 
     if (!result.rows[0]) {
@@ -254,15 +284,15 @@ async function recordRepricingResult(rule: RepricingRule, result: {
   }
 }
 
-export const repricingUndercut = 0.1;
+export const defaultRepricingUndercut = 0.05;
 
 function roundPrice(value: number) {
   return Math.round(value * 100) / 100;
 }
 
 /**
- * Picks the listing price that sits repricingUndercut below the lowest
- * competing offer in the same condition. The same rule applies when the
+ * Picks the listing price that matches, or sits undercutAmount below, the
+ * lowest competing offer in the same condition. The same rule applies when the
  * competitor lowers or raises its price, so the result is stable between runs. Competitor prices are compared as landed prices (item plus
  * shipping), so the seller's own shipping charge is subtracted from the
  * target. The result never goes below the seller's minimum.
@@ -272,6 +302,8 @@ export function computeRepricingTarget(input: {
   ownSellerId?: string;
   currentPrice: number;
   minPrice: number;
+  strategy: RepricingStrategy;
+  undercutAmount: number;
 }): { status: Exclude<RepricingStatus, "updated" | "failed">; competitorPrice?: number; targetPrice?: number } {
   const ownSellerId = input.ownSellerId?.trim().toUpperCase();
   const ownOffer = input.offers.find((offer) => offer.sellerId?.trim().toUpperCase() === ownSellerId);
@@ -299,7 +331,8 @@ export function computeRepricingTarget(input: {
   }
 
   const competitorPrice = roundPrice(Math.min(...competitorPrices));
-  const matchedPrice = roundPrice(competitorPrice - ownShipping - repricingUndercut);
+  const offset = input.strategy === "undercut" ? input.undercutAmount : 0;
+  const matchedPrice = roundPrice(competitorPrice - ownShipping - offset);
   const targetPrice = roundPrice(Math.max(matchedPrice, input.minPrice));
 
   return { status: matchedPrice < input.minPrice ? "at_minimum" : "unchanged", competitorPrice, targetPrice };
@@ -361,6 +394,8 @@ async function repriceConnection(connectionId: string, rules: RepricingRule[]) {
           ownSellerId: connection.sellerId,
           currentPrice: current.currentPrice,
           minPrice: rule.minPrice,
+          strategy: rule.strategy,
+          undercutAmount: rule.undercutAmount,
         });
 
         if (decision.targetPrice === undefined || Math.abs(decision.targetPrice - current.currentPrice) <= 0.005) {
