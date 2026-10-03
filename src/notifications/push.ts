@@ -121,6 +121,7 @@ async function listTenantPushTokens(tenantId: string) {
  */
 export async function sendPushToTenant(tenantId: string, message: PushMessage) {
   const tokens = await listTenantPushTokens(tenantId);
+  const errors: string[] = [];
 
   for (let index = 0; index < tokens.length; index += 100) {
     const chunk = tokens.slice(index, index + 100);
@@ -154,10 +155,14 @@ export async function sendPushToTenant(tenantId: string, message: PushMessage) {
         await deletePushDevice(chunk[ticketIndex]);
       } else {
         // e.g. InvalidCredentials when the iOS push key is missing in EAS.
-        console.error(`Expo push ticket error: ${ticket.details?.error ?? "unknown"}`);
+        const reason = ticket.details?.error ?? "unknown";
+        errors.push(reason);
+        console.error(`Expo push ticket error: ${reason}`);
       }
     }
   }
+
+  return { devices: tokens.length, errors };
 }
 
 export const notificationsRouter = express.Router();
@@ -185,6 +190,23 @@ notificationsRouter.post("/devices", async (req, res, next) => {
 
     await savePushDevice(tenantId, token, platform);
     res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Lets the seller confirm alerts reach their devices without waiting for a
+// real automatic price change.
+notificationsRouter.post("/test", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const result = await sendPushToTenant(tenantId, {
+      title: "Notificaciones activadas",
+      body: "Te avisaremos cada vez que ScannerAz ajuste un precio automáticamente.",
+      data: { screen: "repricing-history" },
+    });
+
+    res.json(result);
   } catch (error) {
     next(error);
   }
