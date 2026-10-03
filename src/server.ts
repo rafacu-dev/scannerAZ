@@ -17,7 +17,11 @@ import {
   getAmazonAuthorizationUrl
 } from "./amazon/oauth.js";
 import { publicAmazonRouter } from "./amazon/publicRoutes.js";
-import { initializeRepricingStore, triggerRepricingCycle } from "./amazon/repricing.js";
+import {
+  consolidateDuplicateAmazonConnections,
+  initializeRepricingStore,
+  triggerRepricingCycle
+} from "./amazon/repricing.js";
 import { initializeRestockStore } from "./amazon/restock.js";
 import { initializePushStore, notificationsRouter } from "./notifications/push.js";
 import { amazonRouter } from "./amazon/routes.js";
@@ -33,6 +37,7 @@ import {
 import {
   initializeAmazonConnectionStore,
   listAmazonConnections,
+  listAmazonConnectionsForTenant,
   saveAmazonConnection,
   usesManagedAmazonConnectionStore
 } from "./storage/connections.js";
@@ -645,7 +650,14 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
       return;
     }
 
-    const id = crypto.randomUUID();
+    // Re-authorizing the same seller refreshes its existing connection, so
+    // repricing/restock rules and history keyed by the connection stay attached.
+    const existingConnection = oauthState.tenantId && sellingPartnerId
+      ? (await listAmazonConnectionsForTenant(oauthState.tenantId)).find((connection) =>
+        connection.sellerId === sellingPartnerId &&
+        connection.marketplaceId === config.AMAZON_MARKETPLACE_ID)
+      : undefined;
+    const id = existingConnection?.id ?? crypto.randomUUID();
     await saveAmazonConnection({
       id,
       tenantId: oauthState.tenantId,
@@ -711,6 +723,7 @@ async function startServer() {
     await Promise.all([initializeAmazonConnectionStore(), initializeInventoryStore(), initializeRepricingStore()]);
     await initializeRestockStore();
     await initializePushStore();
+    await consolidateDuplicateAmazonConnections();
     app.listen(config.PORT, () => {
       console.log(`ScannerAz listening at ${config.APP_BASE_URL}`);
     });

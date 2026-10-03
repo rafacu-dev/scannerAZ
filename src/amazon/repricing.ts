@@ -366,6 +366,79 @@ export async function recordPriceChangeEvent(event: {
   });
 }
 
+/**
+ * Earlier re-authorizations created a new connection ID each time, leaving
+ * repricing/restock rules and history on the older ID. Move them to the newest
+ * connection of the same tenant and seller. Idempotent; runs at startup.
+ * A rule already present on the newest connection wins over an older copy.
+ */
+export async function consolidateDuplicateAmazonConnections() {
+  const pool = getPool();
+
+  if (!pool) {
+    return;
+  }
+
+  await initializeRepricingStore();
+  const { rows: moves } = await pool.query<{ old_id: string; keep_id: string }>(`
+    SELECT id AS old_id, keep_id FROM (
+      SELECT id, first_value(id) OVER (
+        PARTITION BY tenant_id, seller_id, marketplace_id ORDER BY connected_at DESC
+      ) AS keep_id
+      FROM scanneraz_amazon_connections
+      WHERE tenant_id IS NOT NULL AND seller_id IS NOT NULL
+    ) ranked
+    WHERE id <> keep_id
+  `);
+
+  for (const move of moves) {
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE scanneraz_repricing_events SET connection_id = $2 WHERE connection_id = $1`,
+        [move.old_id, move.keep_id]
+      );
+
+      for (const table of ["scanneraz_repricing_rules", "scanneraz_restock_rules"]) {
+        const exists = await client.query<{ present: string | null }>(
+          `SELECT to_regclass($1) AS present`,
+          [table]
+        );
+
+        if (!exists.rows[0]?.present) {
+          continue;
+        }
+
+        await client.query(
+          `
+            UPDATE ${table} AS moved SET connection_id = $2
+            WHERE moved.connection_id = $1
+              AND NOT EXISTS (
+                SELECT 1 FROM ${table} AS kept WHERE kept.connection_id = $2 AND kept.sku = moved.sku
+              )
+          `,
+          [move.old_id, move.keep_id]
+        );
+        // Anything left is superseded by a rule on the newest connection.
+        await client.query(`DELETE FROM ${table} WHERE connection_id = $1`, [move.old_id]);
+      }
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error(`Could not consolidate connection ${move.old_id}`, error);
+    } finally {
+      client.release();
+    }
+  }
+
+  if (moves.length) {
+    console.log(JSON.stringify({ event: "automation.connections_consolidated", moved: moves.length }));
+  }
+}
+
 export async function listRepricingRulesForConnection(tenantId: string, connectionId: string) {
   const connectionPool = getPool();
 
