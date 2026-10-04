@@ -471,6 +471,19 @@ export async function initializeInventoryStore() {
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_asin_mappings_tenant_asin_idx
       ON scanneraz_inventory_asin_mappings (tenant_id, asin);
 
+      -- Receipt line names the seller already matched to a product, so the
+      -- same name is filled in automatically on later receipts.
+      CREATE TABLE IF NOT EXISTS scanneraz_inventory_name_mappings (
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        name_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        asin TEXT,
+        seller_sku TEXT,
+        upc TEXT,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tenant_id, name_key)
+      );
+
       -- Preserve relationships already present in inventory from before this
       -- dedicated mapping table existed. A later explicit invoice selection
       -- can still update a legacy row through the normal upsert below.
@@ -719,6 +732,7 @@ export async function createInventoryInvoice(
     for (const line of lines) {
       const product = await upsertProduct(client, tenantId, line, createdAt);
       await upsertInventoryAsinMapping(client, tenantId, line, createdAt);
+      await upsertInventoryNameMapping(client, tenantId, line, createdAt);
       const lotId = crypto.randomUUID();
       const quantity = positiveInteger(line.quantity, "quantity");
       const unitCostCents = nonNegativeInteger(line.unitCostCents, "unitCostCents");
@@ -2230,6 +2244,81 @@ async function findInventoryAsinMappings(
       source: "saved_mapping" as const
     }
   ]));
+}
+
+/** Exact-name key: case, accents and spacing do not matter. */
+export function inventoryNameKey(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500);
+}
+
+async function upsertInventoryNameMapping(
+  client: Pick<PoolClient, "query">,
+  tenantId: string,
+  line: InventoryInvoiceLineInput,
+  now: Date
+) {
+  const nameKey = inventoryNameKey(line.title ?? "");
+  const asin = normalizeCode(line.asin);
+  const sku = normalizeOptionalText(line.sku);
+  const upc = normalizeInventoryUpc(line.upc);
+
+  if (!nameKey || (!asin && !sku)) {
+    return;
+  }
+
+  await client.query(
+    `
+      INSERT INTO scanneraz_inventory_name_mappings (tenant_id, name_key, title, asin, seller_sku, upc, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (tenant_id, name_key) DO UPDATE SET
+        title = EXCLUDED.title,
+        asin = EXCLUDED.asin,
+        seller_sku = EXCLUDED.seller_sku,
+        upc = COALESCE(EXCLUDED.upc, scanneraz_inventory_name_mappings.upc),
+        updated_at = EXCLUDED.updated_at
+    `,
+    [tenantId, nameKey, line.title.trim().slice(0, 500), asin ?? null, sku ?? null, upc ?? null, now]
+  );
+}
+
+/** Saved product matches for receipt line names (exact name, normalized). */
+export async function resolveInventoryNameMappings(tenantId: string, names: string[]) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const keys = [...new Set(names.map(inventoryNameKey).filter(Boolean))].slice(0, 200);
+
+  if (!keys.length) {
+    return [];
+  }
+
+  const result = await inventoryPool.query<{
+    name_key: string;
+    title: string;
+    asin: string | null;
+    seller_sku: string | null;
+    upc: string | null;
+  }>(
+    `
+      SELECT name_key, title, asin, seller_sku, upc
+      FROM scanneraz_inventory_name_mappings
+      WHERE tenant_id = $1 AND name_key = ANY($2)
+    `,
+    [tenantId, keys]
+  );
+
+  return result.rows.map((row) => ({
+    nameKey: row.name_key,
+    title: row.title,
+    asin: row.asin ?? undefined,
+    sku: row.seller_sku ?? undefined,
+    upc: row.upc ?? undefined,
+  }));
 }
 
 async function upsertInventoryAsinMapping(

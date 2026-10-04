@@ -34,6 +34,7 @@ import {
   importAmazonSalesLines,
   listInventoryInvoices,
   saveInventoryProductImages,
+  resolveInventoryNameMappings,
   recordInventoryAdjustment,
   InsufficientInventoryError,
   InventoryExtractionNotFoundError,
@@ -247,6 +248,15 @@ async function attachMissingProductImages(
     return overview;
   }
 }
+
+inventoryRouter.post("/name-mappings/resolve", async (req, res, next) => {
+  try {
+    const names = z.array(z.string().max(500)).max(200).parse(req.body?.names ?? []);
+    res.json({ mappings: await resolveInventoryNameMappings(requireTenantId(req), names) });
+  } catch (error) {
+    next(error);
+  }
+});
 
 inventoryRouter.post("/asin-mappings/resolve", invoiceAsinResolutionRateLimit, async (req, res, next) => {
   try {
