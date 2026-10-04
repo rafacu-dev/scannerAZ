@@ -1151,7 +1151,14 @@ publicAmazonRouter.post("/connections/:connectionId/listings/prices", async (req
       });
 
       for (const listing of normalizePricingListings(response, marketplaceId).listings) {
-        prices.set(listing.sku, listing);
+        // Keep only exact matches for the requested identifiers.
+        const matches = batch.type === "ASIN"
+          ? Boolean(listing.asin && batch.ids.includes(listing.asin.toUpperCase()))
+          : batch.ids.includes(listing.sku);
+
+        if (matches) {
+          prices.set(listing.sku, listing);
+        }
       }
     }
 
