@@ -3,7 +3,7 @@ import multer, { MulterError } from "multer";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import { assertAmazonSpApiConfig, config } from "../config.js";
-import { getAmazonConnectionForTenant } from "../storage/connections.js";
+import { getAmazonConnectionForTenant, listAmazonConnectionsForTenant } from "../storage/connections.js";
 import {
   AmazonOrdersRequestError,
   getLwaAccessToken,
@@ -33,6 +33,7 @@ import {
   getInventoryOverview,
   importAmazonSalesLines,
   listInventoryInvoices,
+  saveInventoryProductImages,
   recordInventoryAdjustment,
   InsufficientInventoryError,
   InventoryExtractionNotFoundError,
@@ -177,11 +178,75 @@ const resolveReturnSchema = z.object({
 
 inventoryRouter.get("/overview", async (req, res, next) => {
   try {
-    res.json(await getInventoryOverview(requireTenantId(req)));
+    const tenantId = requireTenantId(req);
+    const overview = await getInventoryOverview(tenantId);
+    res.json(await attachMissingProductImages(tenantId, overview));
   } catch (error) {
     next(error);
   }
 });
+
+/**
+ * Products created from receipts usually have no image. Look up to 20 of
+ * them by ASIN in Catalog Items once and store the image, so stock is easy
+ * to recognize. Best-effort: the overview is returned either way.
+ */
+async function attachMissingProductImages(
+  tenantId: string,
+  overview: Awaited<ReturnType<typeof getInventoryOverview>>
+) {
+  const missing = overview.products
+    .filter((product) => !product.imageUrl && product.asin && /^[A-Z0-9]{10}$/i.test(product.asin))
+    .slice(0, 20);
+
+  if (!missing.length) {
+    return overview;
+  }
+
+  try {
+    const [first] = await listAmazonConnectionsForTenant(tenantId);
+    const connection = first ? await getAmazonConnectionForTenant(first.id, tenantId) : undefined;
+
+    if (!connection) {
+      return overview;
+    }
+
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const asins = [...new Set(missing.map((product) => product.asin!.toUpperCase()))];
+    const response = await searchCatalogItems({
+      identifiers: asins,
+      identifierType: "ASIN",
+      refreshToken: connection.refreshToken,
+      marketplaceId,
+      limit: asins.length,
+    });
+    const imageByAsin = new Map(
+      normalizeCatalogSearchResponse(response, marketplaceId)
+        .filter((candidate) => Boolean(candidate.imageUrl))
+        .map((candidate) => [candidate.asin.toUpperCase(), candidate.imageUrl!] as const)
+    );
+    const imageByProductId = new Map(
+      missing.flatMap((product) => {
+        const imageUrl = imageByAsin.get(product.asin!.toUpperCase());
+        return imageUrl ? [[product.id, imageUrl] as const] : [];
+      })
+    );
+
+    if (!imageByProductId.size) {
+      return overview;
+    }
+
+    await saveInventoryProductImages(tenantId, imageByProductId);
+    return {
+      ...overview,
+      products: overview.products.map((product) =>
+        imageByProductId.has(product.id) ? { ...product, imageUrl: imageByProductId.get(product.id) } : product
+      ),
+    };
+  } catch {
+    return overview;
+  }
+}
 
 inventoryRouter.post("/asin-mappings/resolve", invoiceAsinResolutionRateLimit, async (req, res, next) => {
   try {

@@ -1062,6 +1062,19 @@ export async function recordInventoryAdjustment(tenantId: string, input: Invento
   }
 }
 
+/** Stores catalog images found for products that were created without one. */
+export async function saveInventoryProductImages(tenantId: string, imageUrlByProductId: Map<string, string>) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+
+  for (const [productId, imageUrl] of imageUrlByProductId) {
+    await inventoryPool.query(
+      `UPDATE scanneraz_inventory_products SET image_url = $3 WHERE id = $1 AND tenant_id = $2 AND image_url IS NULL`,
+      [productId, tenantId, imageUrl]
+    );
+  }
+}
+
 export type InventoryInvoiceSummary = {
   id: string;
   retailer: string;
