@@ -74,10 +74,40 @@ function isAmazonAuthorizationFailure(error: unknown) {
   return /failed:\s*(401|403)\b|\bunauthori[sz]ed\b|\bforbidden\b|access denied/i.test(message);
 }
 
+/**
+ * One entry per connected Amazon seller account (newest first). Older
+ * duplicates from earlier re-authorizations are hidden; their inventory sync
+ * data is kept. Each entry carries the store name for the account switcher.
+ */
 publicAmazonRouter.get("/connections", async (req, res, next) => {
   try {
     const tenantId = requireTenantId(req);
-    res.json({ amazon: await listAmazonConnectionsForTenant(tenantId) });
+    const seen = new Set<string>();
+    const connections = (await listAmazonConnectionsForTenant(tenantId)).filter((connection) => {
+      const key = `${connection.sellerId ?? connection.id}:${connection.marketplaceId}`;
+
+      if (seen.has(key)) {
+        return false;
+      }
+
+      seen.add(key);
+      return true;
+    });
+    const amazon = await Promise.all(connections.map(async (connection) => {
+      const stored = await getAmazonConnectionForTenant(connection.id, tenantId);
+      const storeName = stored
+        ? await getCachedAmazonSellerStoreName({
+          connectionId: connection.id,
+          sellerId: stored.sellerId,
+          refreshToken: stored.refreshToken,
+          marketplaceId: stored.marketplaceId || config.AMAZON_MARKETPLACE_ID,
+        })
+        : undefined;
+
+      return { ...connection, storeName };
+    }));
+
+    res.json({ amazon });
   } catch (error) {
     next(error);
   }
@@ -1072,7 +1102,7 @@ async function getCachedAmazonSellerStoreName(input: {
   connectionId: string;
   sellerId?: string;
   refreshToken: string;
-  accessToken: string;
+  accessToken?: string;
   marketplaceId: string;
 }) {
   if (!input.sellerId) {

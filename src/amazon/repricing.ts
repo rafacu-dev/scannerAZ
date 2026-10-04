@@ -368,10 +368,11 @@ export async function recordPriceChangeEvent(event: {
 
 /**
  * Earlier re-authorizations created a new connection ID each time, leaving
- * repricing/restock rules and history on the older ID. The app always works
- * with the tenant's newest connection, so move them there (per marketplace;
- * older rows may lack a seller ID). Idempotent; runs at startup. A rule
- * already present on the newest connection wins over an older copy.
+ * repricing/restock rules and history on the older ID. Move them to the
+ * newest connection of the same tenant, seller and marketplace. Different
+ * sellers stay separate (a tenant may connect several Amazon accounts).
+ * Idempotent; runs at startup. A rule already present on the newest
+ * connection wins over an older copy.
  */
 export async function consolidateDuplicateAmazonConnections() {
   const pool = getPool();
@@ -384,7 +385,7 @@ export async function consolidateDuplicateAmazonConnections() {
   const { rows: moves } = await pool.query<{ old_id: string; keep_id: string }>(`
     SELECT id AS old_id, keep_id FROM (
       SELECT id, first_value(id) OVER (
-        PARTITION BY tenant_id, marketplace_id ORDER BY connected_at DESC
+        PARTITION BY tenant_id, COALESCE(seller_id, id), marketplace_id ORDER BY connected_at DESC
       ) AS keep_id
       FROM scanneraz_amazon_connections
       WHERE tenant_id IS NOT NULL
