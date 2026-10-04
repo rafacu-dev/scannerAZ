@@ -540,6 +540,9 @@ export async function initializeInventoryStore() {
         created_at TIMESTAMPTZ NOT NULL
       );
 
+      -- Manual stock additions create lots that no receipt backs.
+      ALTER TABLE scanneraz_inventory_lots ALTER COLUMN invoice_id DROP NOT NULL;
+
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_lots_tenant_product_idx
       ON scanneraz_inventory_lots (tenant_id, product_id, received_at DESC);
 
@@ -948,6 +951,172 @@ export async function recordInventorySale(tenantId: string, input: RecordInvento
     notes: normalizeOptionalText(input.notes),
     occurredAt: parseOccurredAt(input.occurredAt)
   });
+}
+
+export type InventoryAdjustmentInput = {
+  productId: string;
+  /** add: units received without a receipt; remove: units taken out; count: physical count result. */
+  mode: "add" | "remove" | "count";
+  quantity: number;
+  condition?: InventoryCondition;
+  unitCostCents?: number;
+  reason?: string;
+  occurredAt?: string;
+};
+
+/**
+ * Manual stock corrections, recorded as "adjustment" movements. Additions
+ * create a lot without a receipt (cost given or the product's average);
+ * removals consume the oldest lots; a count adds or removes the difference.
+ */
+export async function recordInventoryAdjustment(tenantId: string, input: InventoryAdjustmentInput) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const condition = input.condition ?? "new";
+  const occurredAt = parseOccurredAt(input.occurredAt);
+  const createdAt = new Date();
+  const reason = normalizeOptionalText(input.reason);
+  const client = await inventoryPool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const product = await client.query<{ id: string }>(
+      `SELECT id FROM scanneraz_inventory_products WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+      [input.productId, tenantId]
+    );
+
+    if (!product.rows[0]) {
+      throw new Error("Inventory product not found");
+    }
+
+    const available = await availableInventoryQuantity(client, tenantId, input.productId);
+    let delta: number;
+    let notes: string | undefined;
+
+    if (input.mode === "count") {
+      const counted = nonNegativeInteger(input.quantity, "quantity");
+      delta = counted - available;
+      notes = `Conteo físico: ${available} → ${counted}${reason ? ` · ${reason}` : ""}`;
+    } else {
+      const quantity = positiveInteger(input.quantity, "quantity");
+      delta = input.mode === "add" ? quantity : -quantity;
+      notes = reason ?? (input.mode === "add" ? "Cantidad agregada" : "Cantidad extraída");
+    }
+
+    if (delta > 0) {
+      const averageCost = await client.query<{ average: string | number | null }>(
+        `
+          SELECT ROUND(SUM(received_quantity * unit_cost_cents)::numeric / NULLIF(SUM(received_quantity), 0)) AS average
+          FROM scanneraz_inventory_lots WHERE tenant_id = $1 AND product_id = $2
+        `,
+        [tenantId, input.productId]
+      );
+      const unitCostCents = input.unitCostCents !== undefined
+        ? nonNegativeInteger(input.unitCostCents, "unitCostCents")
+        : numberValue(averageCost.rows[0]?.average);
+      const lotId = crypto.randomUUID();
+
+      await client.query(
+        `
+          INSERT INTO scanneraz_inventory_lots (
+            id, tenant_id, invoice_id, product_id, condition, received_quantity, unit_cost_cents, currency, received_at, created_at
+          ) VALUES ($1, $2, NULL, $3, $4, $5, $6, 'USD', $7, $8)
+        `,
+        [lotId, tenantId, input.productId, condition, delta, unitCostCents, occurredAt, createdAt]
+      );
+      await insertMovement(client, {
+        tenantId,
+        productId: input.productId,
+        lotId,
+        movementType: "adjustment",
+        quantityDelta: delta,
+        condition,
+        notes,
+        occurredAt,
+        createdAt
+      });
+    } else if (delta < 0) {
+      if (available + delta < 0) {
+        throw new InsufficientInventoryError();
+      }
+
+      await allocateOutboundMovements(client, {
+        tenantId,
+        productId: input.productId,
+        movementType: "adjustment",
+        quantity: -delta,
+        condition,
+        notes,
+        occurredAt,
+        createdAt
+      });
+    }
+
+    await client.query("COMMIT");
+    return { productId: input.productId, previousQuantity: available, quantity: available + delta, delta };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export type InventoryInvoiceSummary = {
+  id: string;
+  retailer: string;
+  invoiceNumber?: string;
+  purchasedAt: string;
+  currency: string;
+  lineCount: number;
+  units: number;
+  totalCostCents: number;
+  createdAt: string;
+};
+
+/** Receipts with their line count, units and total cost, newest first. */
+export async function listInventoryInvoices(tenantId: string): Promise<InventoryInvoiceSummary[]> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{
+    id: string;
+    retailer: string;
+    invoice_number: string | null;
+    purchased_at: Date | string;
+    currency: string;
+    line_count: string | number;
+    units: string | number | null;
+    total_cost_cents: string | number | null;
+    created_at: Date | string;
+  }>(
+    `
+      SELECT
+        invoices.id, invoices.retailer, invoices.invoice_number, invoices.purchased_at,
+        invoices.currency, invoices.created_at,
+        COUNT(lots.id) AS line_count,
+        SUM(lots.received_quantity) AS units,
+        SUM(lots.received_quantity * lots.unit_cost_cents) AS total_cost_cents
+      FROM scanneraz_inventory_invoices AS invoices
+      LEFT JOIN scanneraz_inventory_lots AS lots ON lots.invoice_id = invoices.id
+      WHERE invoices.tenant_id = $1
+      GROUP BY invoices.id
+      ORDER BY invoices.purchased_at DESC, invoices.created_at DESC
+      LIMIT 200
+    `,
+    [tenantId]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    retailer: row.retailer,
+    invoiceNumber: row.invoice_number ?? undefined,
+    purchasedAt: new Date(row.purchased_at).toISOString().slice(0, 10),
+    currency: row.currency,
+    lineCount: numberValue(row.line_count),
+    units: numberValue(row.units),
+    totalCostCents: numberValue(row.total_cost_cents),
+    createdAt: new Date(row.created_at).toISOString(),
+  }));
 }
 
 export async function recordAmazonCustomerReturn(
@@ -1827,7 +1996,7 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
         JOIN scanneraz_inventory_products AS products ON products.id = movements.product_id
         WHERE movements.tenant_id = $1
         ORDER BY movements.occurred_at DESC, movements.created_at DESC
-        LIMIT 20
+        LIMIT 200
       `,
       [tenantId]
     ),
@@ -2250,7 +2419,7 @@ async function allocateOutboundMovements(
   input: {
     tenantId: string;
     productId: string;
-    movementType: "sale";
+    movementType: "sale" | "adjustment";
     quantity: number;
     condition: InventoryCondition;
     channel?: string;

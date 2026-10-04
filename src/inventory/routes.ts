@@ -32,6 +32,8 @@ import {
   getAmazonSalesSyncState,
   getInventoryOverview,
   importAmazonSalesLines,
+  listInventoryInvoices,
+  recordInventoryAdjustment,
   InsufficientInventoryError,
   InventoryExtractionNotFoundError,
   InvalidInventoryReturnResolutionError,
@@ -134,6 +136,16 @@ const saleSchema = z.object({
   channel: z.string().trim().min(1).max(100).optional(),
   reference: optionalReference,
   notes: optionalText,
+  occurredAt: occurredAtSchema
+});
+
+const adjustmentSchema = z.object({
+  productId: z.string().uuid(),
+  mode: z.enum(["add", "remove", "count"]),
+  quantity: z.coerce.number().int().min(0).max(100000),
+  condition: conditionSchema.optional(),
+  unitCostCents: z.coerce.number().int().min(0).max(100000000).optional(),
+  reason: z.string().trim().max(200).optional(),
   occurredAt: occurredAtSchema
 });
 
@@ -479,6 +491,23 @@ inventoryRouter.post("/sales", async (req, res, next) => {
     res.status(201).json({ activity });
   } catch (error) {
     respondToInventoryError(error, res, next);
+  }
+});
+
+inventoryRouter.post("/adjustments", async (req, res, next) => {
+  try {
+    const adjustment = await recordInventoryAdjustment(requireTenantId(req), adjustmentSchema.parse(req.body));
+    res.status(201).json({ adjustment });
+  } catch (error) {
+    respondToInventoryError(error, res, next);
+  }
+});
+
+inventoryRouter.get("/invoices", async (req, res, next) => {
+  try {
+    res.json({ invoices: await listInventoryInvoices(requireTenantId(req)) });
+  } catch (error) {
+    next(error);
   }
 });
 
