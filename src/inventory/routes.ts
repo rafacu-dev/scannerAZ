@@ -39,6 +39,7 @@ import {
   InventoryInvoiceNotFoundError,
   saveInventoryProductImages,
   resolveInventoryNameMappings,
+  saveInventoryProductLink,
   recordInventoryAdjustment,
   InsufficientInventoryError,
   InventoryExtractionNotFoundError,
@@ -253,6 +254,22 @@ async function attachMissingProductImages(
     return overview;
   }
 }
+
+inventoryRouter.post("/product-links", async (req, res, next) => {
+  try {
+    const input = z.object({
+      title: z.string().max(500).optional(),
+      upc: z.string().max(40).optional(),
+      asin: z.string().trim().regex(/^[A-Za-z0-9]{10}$/),
+      sku: z.string().max(200).optional(),
+      imageUrl: z.string().url().max(2000).optional(),
+    }).parse(req.body ?? {});
+    await saveInventoryProductLink(requireTenantId(req), { ...input, asin: input.asin.toUpperCase() });
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
 
 inventoryRouter.post("/name-mappings/resolve", async (req, res, next) => {
   try {

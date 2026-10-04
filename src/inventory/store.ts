@@ -2489,6 +2489,46 @@ async function upsertInventoryNameMapping(
   );
 }
 
+/**
+ * Saves a receipt line's product link right when the seller assigns it: the
+ * UPC and the exact line name both point to the chosen ASIN/SKU, so scanning
+ * the same UPC or name again links it automatically.
+ */
+export async function saveInventoryProductLink(tenantId: string, input: {
+  title?: string;
+  upc?: string;
+  asin: string;
+  sku?: string;
+  imageUrl?: string;
+}) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const client = await inventoryPool.connect();
+  const now = new Date();
+  const line: InventoryInvoiceLineInput = {
+    title: input.title ?? "",
+    quantity: 1,
+    unitCostCents: 0,
+    condition: "new",
+    asin: input.asin,
+    sku: input.sku,
+    upc: input.upc,
+    imageUrl: input.imageUrl,
+  };
+
+  try {
+    await client.query("BEGIN");
+    await upsertInventoryAsinMapping(client, tenantId, line, now);
+    await upsertInventoryNameMapping(client, tenantId, line, now);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /** Saved product matches for receipt line names (exact name, normalized). */
 export async function resolveInventoryNameMappings(tenantId: string, names: string[]) {
   const inventoryPool = requirePool();
