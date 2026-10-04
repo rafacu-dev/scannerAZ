@@ -12,6 +12,7 @@ import {
   type AmazonPricingListing,
   buildAmazonReleaseCalendar,
   buildPreliminaryReleaseCalendar,
+  getAmazonFeesEstimate,
   listAmazonRecentOrders,
   preliminaryFeeRate,
   type AmazonRecentOrder,
@@ -43,6 +44,7 @@ import {
 } from "./repricing.js";
 import { listRestockRulesForConnection, saveRestockRule } from "./restock.js";
 import { attachCompetitorSellerNames } from "./sellerNames.js";
+import { listProductCosts, saveProductCost } from "./productCosts.js";
 
 export const publicAmazonRouter = express.Router();
 
@@ -68,6 +70,9 @@ const itemOffersCacheTtlMs = 90_000;
 const sellerStoreNameCache = new Map<string, { expiresAt: number; value?: string }>();
 const sellerStoreNameCacheTtlMs = 6 * 60 * 60 * 1000;
 const sellerStoreNameFailureCacheTtlMs = 5 * 60 * 1000;
+const feesEstimateCache = new Map<string, { expiresAt: number; value: unknown }>();
+const feesEstimateCacheTtlMs = 10 * 60 * 1000;
+let nextFeesEstimateAt = 0;
 const releaseCalendarCache = new Map<string, { expiresAt: number; value: unknown }>();
 const releaseCalendarCacheTtlMs = 5 * 60 * 1000;
 const releaseCalendarLookbackDays = 90;
@@ -957,6 +962,147 @@ async function buildPreliminaryReleaseEstimate(input: {
     days,
   };
 }
+
+/**
+ * Amazon's fee estimate for one ASIN at a price, FBA or FBM. Cached briefly;
+ * calls are spaced to respect the 1 request/second limit.
+ */
+publicAmazonRouter.post("/connections/:connectionId/fees/estimate", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const asin = String(req.body?.asin ?? "").trim().toUpperCase();
+    const price = Math.round(Number(req.body?.price) * 100) / 100;
+    const isAmazonFulfilled = req.body?.fulfillment === "FBA";
+
+    if (!/^[A-Z0-9]{10}$/.test(asin)) {
+      res.status(400).json({ error: "asin is invalid" });
+      return;
+    }
+
+    if (!Number.isFinite(price) || price <= 0 || price > 100000) {
+      res.status(400).json({ error: "price must be greater than 0" });
+      return;
+    }
+
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const cacheKey = `${marketplaceId}:${asin}:${price}:${isAmazonFulfilled}`;
+    const cached = feesEstimateCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > Date.now()) {
+      res.json(cached.value);
+      return;
+    }
+
+    const now = Date.now();
+    const startAt = Math.max(now, nextFeesEstimateAt);
+    nextFeesEstimateAt = startAt + 1100;
+
+    if (startAt > now) {
+      await delay(startAt - now);
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const value = await getAmazonFeesEstimate({
+      refreshToken: connection.refreshToken,
+      asin,
+      price,
+      isAmazonFulfilled,
+      marketplaceId,
+    });
+
+    if (!value.error) {
+      feesEstimateCache.set(cacheKey, { value, expiresAt: Date.now() + feesEstimateCacheTtlMs });
+    }
+
+    res.json(value);
+  } catch (error) {
+    next(error);
+  }
+});
+
+publicAmazonRouter.get("/connections/:connectionId/product-costs", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    res.json({ connectionId, costs: await listProductCosts(tenantId, connectionId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+publicAmazonRouter.put("/connections/:connectionId/product-costs/:sku", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const sku = String(req.params.sku ?? "").trim();
+    const money = (value: unknown) => {
+      if (value === undefined || value === null || value === "") {
+        return undefined;
+      }
+
+      const number = Math.round(Number(value) * 100) / 100;
+      return Number.isFinite(number) && number >= 0 && number <= 100000 ? number : NaN;
+    };
+    const costPrice = money(req.body?.costPrice);
+    const salePrice = money(req.body?.salePrice);
+    const fbmCost = money(req.body?.fbmCost) ?? 0;
+    const quantity = Number(req.body?.quantity ?? 1);
+    const asin = String(req.body?.asin ?? "").trim().toUpperCase();
+
+    if (!sku || sku.length > 200) {
+      res.status(400).json({ error: "sku is invalid" });
+      return;
+    }
+
+    if ([costPrice, salePrice, fbmCost].some((value) => Number.isNaN(value))) {
+      res.status(400).json({ error: "prices must be between 0 and 100000" });
+      return;
+    }
+
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100000) {
+      res.status(400).json({ error: "quantity must be a whole number of at least 1" });
+      return;
+    }
+
+    const cost = await saveProductCost({
+      tenantId,
+      connectionId,
+      sku,
+      asin: /^[A-Z0-9]{10}$/.test(asin) ? asin : undefined,
+      costPrice,
+      salePrice,
+      fulfillment: req.body?.fulfillment === "FBA" ? "FBA" : "FBM",
+      fbmCost,
+      quantity,
+    });
+
+    res.json({ cost });
+  } catch (error) {
+    next(error);
+  }
+});
 
 publicAmazonRouter.delete("/connections/:connectionId", async (req, res, next) => {
   try {

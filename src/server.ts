@@ -23,6 +23,7 @@ import {
   triggerRepricingCycle
 } from "./amazon/repricing.js";
 import { initializeRestockStore } from "./amazon/restock.js";
+import { initializeProductCostStore } from "./amazon/productCosts.js";
 import { initializePushStore, notificationsRouter } from "./notifications/push.js";
 import { amazonRouter } from "./amazon/routes.js";
 import { inventoryRouter } from "./inventory/routes.js";
@@ -722,6 +723,7 @@ async function startServer() {
     await initializeAccountStore();
     await Promise.all([initializeAmazonConnectionStore(), initializeInventoryStore(), initializeRepricingStore()]);
     await initializeRestockStore();
+    await initializeProductCostStore();
     await initializePushStore();
     await consolidateDuplicateAmazonConnections();
     void reportDuplicateAmazonSaleLines().catch((error) => {

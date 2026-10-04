@@ -10,6 +10,7 @@ import {
   getSpApiEndpoint,
   inferCatalogIdentifierType,
   normalizeAmazonDeferredTransactions,
+  normalizeAmazonFeesEstimate,
   normalizeAmazonItemOffers,
   normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
@@ -537,4 +538,25 @@ test("estimates releases 7 days after delivery, net of an approximate fee", () =
     { date: "2026-10-12", amount: 85, currency: "USD", transactionCount: 1 },
     { date: "2026-10-13", amount: 17, currency: "USD", transactionCount: 1 }
   ]);
+});
+
+test("normalizes an Amazon fee estimate", () => {
+  const estimate = normalizeAmazonFeesEstimate({
+    payload: {
+      FeesEstimateResult: {
+        Status: "Success",
+        FeesEstimate: {
+          TotalFeesEstimate: { CurrencyCode: "USD", Amount: 5.52 },
+          FeeDetailList: [
+            { FeeType: "ReferralFee", FinalFee: { CurrencyCode: "USD", Amount: 5.52 } },
+            { FeeType: "VariableClosingFee", FinalFee: { CurrencyCode: "USD", Amount: 0 } }
+          ]
+        }
+      }
+    }
+  }, "B000000001", 46, false);
+
+  assert.equal(estimate.totalFees, 5.52);
+  assert.equal(estimate.error, undefined);
+  assert.deepEqual(estimate.fees[0], { type: "ReferralFee", amount: 5.52 });
 });

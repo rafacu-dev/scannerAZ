@@ -621,6 +621,90 @@ export function normalizeAmazonDeferredTransactions(value: unknown): {
  * Sums deferred transactions by their UTC release day. Amounts are net:
  * refunds and fees that mature on the same day reduce that day's release.
  */
+export type AmazonFeesEstimate = {
+  asin: string;
+  price: number;
+  isAmazonFulfilled: boolean;
+  totalFees?: number;
+  currency?: string;
+  fees: Array<{ type: string; amount: number }>;
+  error?: string;
+};
+
+/**
+ * Product Fees v0 getMyFeesEstimateForASIN: Amazon's own fee estimate for a
+ * price and fulfillment method (referral, closing and, for FBA, fulfillment
+ * fees). Covered by the Pricing role. Rate: 1 request per second.
+ */
+export async function getAmazonFeesEstimate(input: {
+  refreshToken: string;
+  accessToken?: string;
+  asin: string;
+  price: number;
+  isAmazonFulfilled: boolean;
+  marketplaceId?: string;
+  currency?: string;
+}): Promise<AmazonFeesEstimate> {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const asin = normalizeAsin(input.asin);
+  const url = new URL(`/products/fees/v0/items/${encodeURIComponent(asin)}/feesEstimate`, endpoint);
+  const currency = input.currency ?? "USD";
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { ...spApiReadHeaders(accessToken), "content-type": "application/json" },
+    body: JSON.stringify({
+      FeesEstimateRequest: {
+        MarketplaceId: input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID,
+        IsAmazonFulfilled: input.isAmazonFulfilled,
+        PriceToEstimateFees: {
+          ListingPrice: { CurrencyCode: currency, Amount: input.price },
+          Shipping: { CurrencyCode: currency, Amount: 0 },
+        },
+        Identifier: `scanneraz-${asin}-${input.price}-${input.isAmazonFulfilled ? "fba" : "fbm"}`,
+      },
+    }),
+  });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Product Fees", response.status, parsedBody, "Pricing"));
+  }
+
+  return normalizeAmazonFeesEstimate(parsedBody, asin, input.price, input.isAmazonFulfilled);
+}
+
+export function normalizeAmazonFeesEstimate(
+  value: unknown,
+  asin: string,
+  price: number,
+  isAmazonFulfilled: boolean,
+): AmazonFeesEstimate {
+  const payload = asRecord(recordValue(asRecord(value), ["payload"]));
+  const result = asRecord(recordValue(payload, ["FeesEstimateResult"]));
+  const estimate = asRecord(recordValue(result, ["FeesEstimate"]));
+  const total = asRecord(recordValue(estimate, ["TotalFeesEstimate"]));
+  const error = asRecord(recordValue(result, ["Error"]));
+  const fees = recordArray(recordValue(estimate, ["FeeDetailList"])).flatMap((detail) => {
+    const type = stringValue(recordValue(detail, ["FeeType"]));
+    const amount = numberValue(recordValue(asRecord(recordValue(detail, ["FinalFee"])), ["Amount"]));
+    return type && amount !== undefined ? [{ type, amount }] : [];
+  });
+
+  return {
+    asin,
+    price,
+    isAmazonFulfilled,
+    totalFees: numberValue(recordValue(total, ["Amount"])),
+    currency: stringValue(recordValue(total, ["CurrencyCode"])),
+    fees,
+    error: stringValue(recordValue(result, ["Status"])) === "Success"
+      ? undefined
+      : stringValue(recordValue(error, ["Message"])) ?? "Amazon no devolvió una estimación de comisiones.",
+  };
+}
+
 /** Order totals and delivery windows used for a preliminary payout estimate. */
 export type AmazonRecentOrder = {
   orderId: string;
