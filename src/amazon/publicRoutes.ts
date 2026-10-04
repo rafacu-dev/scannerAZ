@@ -38,6 +38,7 @@ import {
   saveRepricingRule
 } from "./repricing.js";
 import { listRestockRulesForConnection, saveRestockRule } from "./restock.js";
+import { attachCompetitorSellerNames } from "./sellerNames.js";
 
 export const publicAmazonRouter = express.Router();
 
@@ -377,7 +378,9 @@ publicAmazonRouter.get("/connections/:connectionId/items/:asin/offers", async (r
         connectionId,
         marketplaceId,
         cached: true,
-        offers: applyAmazonSellerStoreName(cached, connection.sellerId, sellerStoreName),
+        offers: (await attachCompetitorSellerNames([
+          applyAmazonSellerStoreName(cached, connection.sellerId, sellerStoreName),
+        ]))[0],
       });
       return;
     }
@@ -398,7 +401,9 @@ publicAmazonRouter.get("/connections/:connectionId/items/:asin/offers", async (r
       connectionId,
       marketplaceId,
       cached: false,
-      offers: applyAmazonSellerStoreName(offers, connection.sellerId, sellerStoreName),
+      offers: (await attachCompetitorSellerNames([
+        applyAmazonSellerStoreName(offers, connection.sellerId, sellerStoreName),
+      ]))[0],
     });
   } catch (error) {
     next(error);
@@ -465,7 +470,9 @@ publicAmazonRouter.post("/connections/:connectionId/listings/pricing/offers", as
     res.json({
       connectionId,
       marketplaceId,
-      offers: asins.map((asin) => cachedByAsin.get(asin) ?? emptyItemOffersResult(asin))
+      offers: await attachCompetitorSellerNames(
+        asins.map((asin) => cachedByAsin.get(asin) ?? emptyItemOffersResult(asin)),
+      )
     });
   } catch (error) {
     next(error);
