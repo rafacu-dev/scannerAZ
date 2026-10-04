@@ -125,6 +125,9 @@ export type InventoryOverview = {
   summary: {
     productCount: number;
     availableUnits: number;
+    /** Units sold before being bought (negative stock): what to purchase. */
+    unitsToBuy: number;
+    productsToBuy: number;
     inventoryValueCents: number;
     soldUnits: number;
     customerReturnUnits: number;
@@ -968,6 +971,7 @@ export async function confirmInvoiceExtraction(
 
 export async function recordInventorySale(tenantId: string, input: RecordInventorySaleInput) {
   return recordOutboundMovement(tenantId, {
+    allowNegative: true,
     productId: input.productId,
     quantity: input.quantity,
     condition: input.condition,
@@ -2235,7 +2239,9 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
   return {
     summary: {
       productCount: products.length,
-      availableUnits: products.reduce((total, product) => total + product.availableQuantity, 0),
+      availableUnits: products.reduce((total, product) => total + Math.max(product.availableQuantity, 0), 0),
+      unitsToBuy: products.reduce((total, product) => total + Math.max(-product.availableQuantity, 0), 0),
+      productsToBuy: products.filter((product) => product.availableQuantity < 0).length,
       inventoryValueCents: products.reduce((total, product) => total + product.inventoryValueCents, 0),
       soldUnits: products.reduce((total, product) => total + product.soldQuantity, 0),
       customerReturnUnits: products.reduce((total, product) => total + product.customerReturnQuantity, 0),
@@ -2288,6 +2294,8 @@ async function recordOutboundMovement(
     sourceType?: string;
     sourceId?: string;
     occurredAt: Date;
+    /** Sales may exceed stock (sell first, buy later); stock goes negative. */
+    allowNegative?: boolean;
   }
 ) {
   const inventoryPool = requirePool();
@@ -2298,12 +2306,20 @@ async function recordOutboundMovement(
 
   try {
     await client.query("BEGIN");
-    await requireAvailableQuantity(client, tenantId, input.productId, quantity);
-    const activities = await allocateOutboundMovements(client, {
+    let allocatable = quantity;
+
+    if (input.allowNegative) {
+      await requireTenantProduct(client, tenantId, input.productId);
+      allocatable = Math.min(quantity, Math.max(0, await availableInventoryQuantity(client, tenantId, input.productId)));
+    } else {
+      await requireAvailableQuantity(client, tenantId, input.productId, quantity);
+    }
+
+    const activities = allocatable > 0 ? await allocateOutboundMovements(client, {
       tenantId,
       productId: input.productId,
       movementType: input.movementType,
-      quantity,
+      quantity: allocatable,
       condition: input.condition,
       channel: input.channel,
       reference: input.reference,
@@ -2312,7 +2328,28 @@ async function recordOutboundMovement(
       sourceId: input.sourceId,
       occurredAt: input.occurredAt,
       createdAt
-    });
+    }) : [];
+    const backordered = quantity - allocatable;
+
+    // Units sold beyond stock have no lot yet; a later receipt's lot absorbs
+    // them first through the FIFO unallocated-outbound handling.
+    if (backordered > 0) {
+      activities.push(await insertMovement(client, {
+        tenantId,
+        productId: input.productId,
+        movementType: input.movementType,
+        quantityDelta: -backordered,
+        condition: input.condition,
+        channel: input.channel,
+        reference: input.reference,
+        notes: input.notes ? `${input.notes} · Pendiente de comprar` : "Pendiente de comprar",
+        sourceType: input.sourceType,
+        sourceId: input.sourceId,
+        occurredAt: input.occurredAt,
+        createdAt
+      }));
+    }
+
     await client.query("COMMIT");
     return activities[0] ?? { id: crypto.randomUUID() };
   } catch (error) {
