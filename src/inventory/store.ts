@@ -1101,6 +1101,82 @@ export type InventoryInvoiceSummary = {
   createdAt: string;
 };
 
+export type InventoryInvoiceDetail = InventoryInvoiceSummary & {
+  notes?: string;
+  lines: Array<{
+    lotId: string;
+    productId: string;
+    title: string;
+    sku?: string;
+    asin?: string;
+    upc?: string;
+    imageUrl?: string;
+    condition: InventoryCondition;
+    quantity: number;
+    unitCostCents: number;
+    totalCostCents: number;
+  }>;
+};
+
+/** One receipt with every line (lot) and its product. */
+export async function getInventoryInvoice(tenantId: string, invoiceId: string): Promise<InventoryInvoiceDetail | undefined> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const summary = (await listInventoryInvoices(tenantId)).find((invoice) => invoice.id === invoiceId);
+
+  if (!summary) {
+    return undefined;
+  }
+
+  const [notesResult, linesResult] = await Promise.all([
+    inventoryPool.query<{ notes: string | null }>(
+      `SELECT notes FROM scanneraz_inventory_invoices WHERE id = $1 AND tenant_id = $2`,
+      [invoiceId, tenantId]
+    ),
+    inventoryPool.query<{
+      lot_id: string;
+      product_id: string;
+      title: string;
+      sku: string | null;
+      asin: string | null;
+      upc: string | null;
+      image_url: string | null;
+      condition: InventoryCondition;
+      received_quantity: number;
+      unit_cost_cents: number;
+    }>(
+      `
+        SELECT
+          lots.id AS lot_id, lots.product_id, products.title, products.sku, products.asin, products.upc,
+          products.image_url, lots.condition, lots.received_quantity, lots.unit_cost_cents
+        FROM scanneraz_inventory_lots AS lots
+        JOIN scanneraz_inventory_products AS products ON products.id = lots.product_id
+        WHERE lots.tenant_id = $1 AND lots.invoice_id = $2
+        ORDER BY lots.created_at ASC, lots.id ASC
+      `,
+      [tenantId, invoiceId]
+    ),
+  ]);
+
+  return {
+    ...summary,
+    notes: notesResult.rows[0]?.notes ?? undefined,
+    lines: linesResult.rows.map((row) => ({
+      lotId: row.lot_id,
+      productId: row.product_id,
+      title: row.title,
+      sku: row.sku ?? undefined,
+      asin: row.asin ?? undefined,
+      upc: row.upc ?? undefined,
+      imageUrl: row.image_url ?? undefined,
+      condition: row.condition,
+      quantity: row.received_quantity,
+      unitCostCents: row.unit_cost_cents,
+      totalCostCents: row.received_quantity * row.unit_cost_cents,
+    })),
+  };
+}
+
 /** Receipts with their line count, units and total cost, newest first. */
 export async function listInventoryInvoices(tenantId: string): Promise<InventoryInvoiceSummary[]> {
   const inventoryPool = requirePool();

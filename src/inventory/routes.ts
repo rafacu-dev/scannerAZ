@@ -33,6 +33,7 @@ import {
   getInventoryOverview,
   importAmazonSalesLines,
   listInventoryInvoices,
+  getInventoryInvoice,
   saveInventoryProductImages,
   resolveInventoryNameMappings,
   recordInventoryAdjustment,
@@ -575,6 +576,21 @@ inventoryRouter.post("/adjustments", async (req, res, next) => {
     res.status(201).json({ adjustment });
   } catch (error) {
     respondToInventoryError(error, res, next);
+  }
+});
+
+inventoryRouter.get("/invoices/:invoiceId", async (req, res, next) => {
+  try {
+    const invoice = await getInventoryInvoice(requireTenantId(req), String(req.params.invoiceId ?? ""));
+
+    if (!invoice) {
+      res.status(404).json({ error: "Receipt not found" });
+      return;
+    }
+
+    res.json({ invoice });
+  } catch (error) {
+    next(error);
   }
 });
 
