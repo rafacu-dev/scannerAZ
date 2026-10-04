@@ -123,9 +123,12 @@ const accountRateLimit = rateLimit({
     });
   }
 });
+// Per-account ceiling for all app requests. Amazon-quota-sensitive calls
+// (offers, fees) are paced separately, so this only stops runaway clients;
+// receipt review and multi-store lookups legitimately exceed 30/min.
 const publicTenantRateLimit = rateLimit({
   windowMs: 60 * 1000,
-  limit: 30,
+  limit: 300,
   legacyHeaders: false,
   standardHeaders: true,
   // Invoice extraction has its own authenticated upload path and is not a
