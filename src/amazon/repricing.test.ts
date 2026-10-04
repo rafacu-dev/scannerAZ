@@ -91,3 +91,21 @@ test("recognizes Expo push tokens", async () => {
   assert.equal(isExpoPushToken("ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]"), true);
   assert.equal(isExpoPushToken("not-a-token"), false);
 });
+
+test("ignores the account's other linked stores as competitors", () => {
+  const decision = computeRepricingTarget({
+    offers: [
+      own,
+      { sellerId: "SISTER", fulfillment: "FBM", condition: "new", landedPrice: 15 },
+      { sellerId: "RIVAL", fulfillment: "FBA", condition: "new", landedPrice: 21.5 },
+    ],
+    ownSellerId: "OWN",
+    linkedSellerIds: ["OWN", "SISTER"],
+    currentPrice: 20,
+    minPrice: 10,
+    strategy: "match",
+    undercutAmount: 0.05,
+  });
+
+  assert.deepEqual(decision, { status: "unchanged", competitorPrice: 21.5, targetPrice: 18.5 });
+});

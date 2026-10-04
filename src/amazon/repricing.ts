@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 import { assertAmazonSpApiConfig, config } from "../config.js";
-import { getAmazonConnection } from "../storage/connections.js";
+import { getAmazonConnection, listAmazonConnectionsForTenant } from "../storage/connections.js";
 import { withItemOffersBatchSlot } from "./offersRateLimit.js";
 import { runRestockCycle } from "./restock.js";
 import { sendPushToTenant } from "../notifications/push.js";
@@ -589,16 +589,20 @@ function roundPrice(value: number) {
  * competitor lowers or raises its price, so the result is stable between runs. Competitor prices are compared as landed prices (item plus
  * shipping), so the seller's own shipping charge is subtracted from the
  * target. The result never goes below the seller's minimum.
+ * Offers from the tenant's other linked stores are not competitors, so two
+ * stores of the same account never undercut each other.
  */
 export function computeRepricingTarget(input: {
   offers: AmazonItemOffer[];
   ownSellerId?: string;
+  linkedSellerIds?: string[];
   currentPrice: number;
   minPrice: number;
   strategy: RepricingStrategy;
   undercutAmount: number;
 }): { status: Exclude<RepricingStatus, "updated" | "failed">; competitorPrice?: number; targetPrice?: number } {
   const ownSellerId = input.ownSellerId?.trim().toUpperCase();
+  const linkedSellerIds = new Set((input.linkedSellerIds ?? []).map((id) => id.trim().toUpperCase()));
   const ownOffer = input.offers.find((offer) => offer.sellerId?.trim().toUpperCase() === ownSellerId);
   const ownShipping = ownOffer?.landedPrice !== undefined && ownOffer.listingPrice !== undefined
     ? Math.max(0, ownOffer.landedPrice - ownOffer.listingPrice)
@@ -608,7 +612,12 @@ export function computeRepricingTarget(input: {
     const sellerId = offer.sellerId?.trim().toUpperCase();
     const condition = offer.condition?.trim().toLowerCase();
 
-    if (!sellerId || sellerId === ownSellerId || (ownCondition && condition && condition !== ownCondition)) {
+    if (
+      !sellerId ||
+      sellerId === ownSellerId ||
+      linkedSellerIds.has(sellerId) ||
+      (ownCondition && condition && condition !== ownCondition)
+    ) {
       return [];
     }
 
@@ -694,6 +703,11 @@ async function repriceConnection(connectionId: string, rules: RepricingRule[], c
   const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
   const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
   const ownedRules = rules.filter((rule) => rule.tenantId === connection.tenantId);
+  const linkedSellerIds = connection.tenantId
+    ? (await listAmazonConnectionsForTenant(connection.tenantId))
+      .map((linked) => linked.sellerId)
+      .filter((sellerId): sellerId is string => Boolean(sellerId))
+    : [];
 
   for (let index = 0; index < ownedRules.length; index += 20) {
     const chunk = ownedRules.slice(index, index + 20);
@@ -734,6 +748,7 @@ async function repriceConnection(connectionId: string, rules: RepricingRule[], c
         const decision = computeRepricingTarget({
           offers: offers.offers,
           ownSellerId: connection.sellerId,
+          linkedSellerIds,
           currentPrice: current.currentPrice,
           minPrice: rule.minPrice,
           strategy: rule.strategy,
