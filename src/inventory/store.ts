@@ -220,6 +220,18 @@ export class InventoryProductNotFoundError extends Error {
   }
 }
 
+export class InventoryInvoiceInUseError extends Error {
+  constructor() {
+    super("Este recibo tiene unidades que ya se vendieron, extrajeron o ajustaron. Corrige el stock con un ajuste en lugar de eliminarlo.");
+  }
+}
+
+export class InventoryInvoiceNotFoundError extends Error {
+  constructor() {
+    super("Recibo no encontrado.");
+  }
+}
+
 export class InsufficientInventoryError extends Error {
   constructor() {
     super("No hay unidades disponibles suficientes para registrar esta salida.");
@@ -1117,6 +1129,61 @@ export type InventoryInvoiceDetail = InventoryInvoiceSummary & {
     totalCostCents: number;
   }>;
 };
+
+/**
+ * Deletes a receipt with its lots and their entry movements. Refused when any
+ * unit from its lots already left stock, so sales never lose their source lot
+ * and stock cannot go negative.
+ */
+export async function deleteInventoryInvoice(tenantId: string, invoiceId: string) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const client = await inventoryPool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const invoice = await client.query(
+      `SELECT id FROM scanneraz_inventory_invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+      [invoiceId, tenantId]
+    );
+
+    if (!invoice.rows[0]) {
+      throw new InventoryInvoiceNotFoundError();
+    }
+
+    const used = await client.query(
+      `
+        SELECT 1
+        FROM scanneraz_inventory_movements AS movements
+        JOIN scanneraz_inventory_lots AS lots ON lots.id = movements.lot_id
+        WHERE lots.invoice_id = $1 AND lots.tenant_id = $2 AND movements.movement_type <> 'purchase'
+        LIMIT 1
+      `,
+      [invoiceId, tenantId]
+    );
+
+    if (used.rows[0]) {
+      throw new InventoryInvoiceInUseError();
+    }
+
+    await client.query(
+      `
+        DELETE FROM scanneraz_inventory_movements
+        WHERE tenant_id = $2 AND movement_type = 'purchase'
+          AND lot_id IN (SELECT id FROM scanneraz_inventory_lots WHERE invoice_id = $1 AND tenant_id = $2)
+      `,
+      [invoiceId, tenantId]
+    );
+    await client.query(`DELETE FROM scanneraz_inventory_lots WHERE invoice_id = $1 AND tenant_id = $2`, [invoiceId, tenantId]);
+    await client.query(`DELETE FROM scanneraz_inventory_invoices WHERE id = $1 AND tenant_id = $2`, [invoiceId, tenantId]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 /** One receipt with every line (lot) and its product. */
 export async function getInventoryInvoice(tenantId: string, invoiceId: string): Promise<InventoryInvoiceDetail | undefined> {

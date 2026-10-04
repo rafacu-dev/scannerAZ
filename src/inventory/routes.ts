@@ -34,6 +34,9 @@ import {
   importAmazonSalesLines,
   listInventoryInvoices,
   getInventoryInvoice,
+  deleteInventoryInvoice,
+  InventoryInvoiceInUseError,
+  InventoryInvoiceNotFoundError,
   saveInventoryProductImages,
   resolveInventoryNameMappings,
   recordInventoryAdjustment,
@@ -576,6 +579,25 @@ inventoryRouter.post("/adjustments", async (req, res, next) => {
     res.status(201).json({ adjustment });
   } catch (error) {
     respondToInventoryError(error, res, next);
+  }
+});
+
+inventoryRouter.delete("/invoices/:invoiceId", async (req, res, next) => {
+  try {
+    await deleteInventoryInvoice(requireTenantId(req), String(req.params.invoiceId ?? ""));
+    res.status(204).end();
+  } catch (error) {
+    if (error instanceof InventoryInvoiceInUseError) {
+      res.status(409).json({ error: error.message });
+      return;
+    }
+
+    if (error instanceof InventoryInvoiceNotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+
+    next(error);
   }
 });
 
