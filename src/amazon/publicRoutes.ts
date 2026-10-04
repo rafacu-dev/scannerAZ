@@ -1104,6 +1104,71 @@ publicAmazonRouter.put("/connections/:connectionId/product-costs/:sku", async (r
   }
 });
 
+/**
+ * Current listing prices for specific products of this store (by ASIN or
+ * SKU), e.g. to value inventory without paging through every listing.
+ */
+publicAmazonRouter.post("/connections/:connectionId/listings/prices", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection?.sellerId) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const clean = (value: unknown, pattern: RegExp) => Array.isArray(value)
+      ? [...new Set(value.map((item) => String(item ?? "").trim()).filter((item) => pattern.test(item)))].slice(0, 100)
+      : [];
+    const asins = clean(req.body?.asins, /^[A-Za-z0-9]{10}$/).map((asin) => asin.toUpperCase());
+    const skus = clean(req.body?.skus, /^.{1,200}$/);
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    const prices = new Map<string, AmazonPricingListing>();
+    const batches: Array<{ type: "ASIN" | "SKU"; ids: string[] }> = [];
+
+    for (let index = 0; index < asins.length; index += 20) {
+      batches.push({ type: "ASIN", ids: asins.slice(index, index + 20) });
+    }
+
+    for (let index = 0; index < skus.length; index += 20) {
+      batches.push({ type: "SKU", ids: skus.slice(index, index + 20) });
+    }
+
+    for (const batch of batches) {
+      const response = await searchSellerListings({
+        sellerId: connection.sellerId,
+        refreshToken: connection.refreshToken,
+        accessToken,
+        marketplaceId,
+        pageSize: 20,
+        identifiers: batch.ids,
+        identifiersType: batch.type,
+      });
+
+      for (const listing of normalizePricingListings(response, marketplaceId).listings) {
+        prices.set(listing.sku, listing);
+      }
+    }
+
+    res.json({
+      connectionId,
+      listings: [...prices.values()].map((listing) => ({
+        sku: listing.sku,
+        asin: listing.asin,
+        price: listing.price,
+        currency: listing.currency,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 publicAmazonRouter.delete("/connections/:connectionId", async (req, res, next) => {
   try {
     const tenantId = requireTenantId(req);

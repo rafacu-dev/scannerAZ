@@ -371,6 +371,9 @@ export async function searchSellerListings(input: {
   pageSize?: number;
   pageToken?: string;
   withStatus?: "BUYABLE" | "DISCOVERABLE";
+  /** Up to 20 ASINs or SKUs to look up instead of paging every listing. */
+  identifiers?: string[];
+  identifiersType?: "ASIN" | "SKU";
 }) {
   const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
   const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
@@ -386,6 +389,11 @@ export async function searchSellerListings(input: {
 
   if (input.withStatus) {
     url.searchParams.set("withStatus", input.withStatus);
+  }
+
+  if (input.identifiers?.length && input.identifiersType) {
+    url.searchParams.set("identifiers", input.identifiers.slice(0, 20).join(","));
+    url.searchParams.set("identifiersType", input.identifiersType);
   }
 
   if (input.pageToken) {
