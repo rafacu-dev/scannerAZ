@@ -1,6 +1,7 @@
 import { assertAmazonSpApiConfig, config } from "../config.js";
 import { getAmazonConnection } from "../storage/connections.js";
 import { getAutomationPool, recordPriceChangeEvent } from "./repricing.js";
+import { sendPushToTenant } from "../notifications/push.js";
 import {
   getLwaAccessToken,
   getSellerListingItem,
@@ -221,7 +222,48 @@ async function recordRestockResult(rule: RestockRule, result: {
   }
 }
 
-async function restockConnection(connectionId: string, rules: RestockRule[]) {
+type AutomaticRestock = {
+  tenantId: string;
+  sku: string;
+  title?: string;
+  quantity: number;
+};
+
+function shortTitle(restock: AutomaticRestock) {
+  const title = restock.title?.trim() || restock.sku;
+  return title.length > 60 ? `${title.slice(0, 57)}...` : title;
+}
+
+/** One push per tenant and cycle, like automatic price changes. */
+async function notifyAutomaticRestocks(restocks: AutomaticRestock[]) {
+  const restocksByTenant = new Map<string, AutomaticRestock[]>();
+
+  for (const restock of restocks) {
+    restocksByTenant.set(restock.tenantId, [...(restocksByTenant.get(restock.tenantId) ?? []), restock]);
+  }
+
+  for (const [tenantId, tenantRestocks] of restocksByTenant) {
+    const [first] = tenantRestocks;
+    const message = tenantRestocks.length === 1
+      ? {
+        title: "Stock repuesto automáticamente",
+        body: `${shortTitle(first)}: 0 → ${first.quantity} unidades`,
+      }
+      : {
+        title: `${tenantRestocks.length} productos repuestos automáticamente`,
+        body: tenantRestocks.slice(0, 3).map(shortTitle).join(", ") +
+          (tenantRestocks.length > 3 ? ` y ${tenantRestocks.length - 3} más` : ""),
+      };
+
+    try {
+      await sendPushToTenant(tenantId, { ...message, data: { screen: "repricing-history" } });
+    } catch (error) {
+      console.error(`Could not send restock push to tenant ${tenantId}`, error);
+    }
+  }
+}
+
+async function restockConnection(connectionId: string, rules: RestockRule[], restocks: AutomaticRestock[]) {
   const connection = await getAmazonConnection(connectionId);
 
   if (!connection?.sellerId) {
@@ -291,6 +333,8 @@ async function restockConnection(connectionId: string, rules: RestockRule[]) {
         // Amazon already accepted the quantity; history is best-effort.
         console.error(`Could not record restock history for ${rule.sku}`, error);
       }
+
+      restocks.push({ tenantId: rule.tenantId, sku: rule.sku, title: prepared.title, quantity: rule.quantity });
     } catch (error) {
       await recordRestockResult(rule, {
         status: "failed",
@@ -303,6 +347,7 @@ async function restockConnection(connectionId: string, rules: RestockRule[]) {
 export async function runRestockCycle() {
   const rules = await listEnabledRestockRules();
   const rulesByConnection = new Map<string, RestockRule[]>();
+  const restocks: AutomaticRestock[] = [];
 
   for (const rule of rules) {
     rulesByConnection.set(rule.connectionId, [...(rulesByConnection.get(rule.connectionId) ?? []), rule]);
@@ -310,9 +355,11 @@ export async function runRestockCycle() {
 
   for (const [connectionId, connectionRules] of rulesByConnection) {
     try {
-      await restockConnection(connectionId, connectionRules);
+      await restockConnection(connectionId, connectionRules, restocks);
     } catch (error) {
       console.error(`Restock failed for connection ${connectionId}`, error);
     }
   }
+
+  await notifyAutomaticRestocks(restocks);
 }
