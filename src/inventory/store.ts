@@ -384,6 +384,48 @@ export function usesManagedInventoryStore() {
   return Boolean(config.DATABASE_URL);
 }
 
+/**
+ * Read-only diagnostic: order items stored under more than one connection
+ * (from duplicate connections) and the stock they may have deducted twice.
+ */
+export async function reportDuplicateAmazonSaleLines() {
+  const inventoryPool = getPool();
+
+  if (!inventoryPool) {
+    return;
+  }
+
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{
+    tenant_id: string;
+    extra_rows: string;
+    extra_applied_units: string | null;
+  }>(`
+    WITH ranked AS (
+      SELECT tenant_id, applied_quantity,
+        row_number() OVER (
+          PARTITION BY tenant_id, amazon_order_id, amazon_order_item_id ORDER BY created_at ASC, id ASC
+        ) AS position
+      FROM scanneraz_inventory_amazon_order_lines
+    )
+    SELECT tenant_id,
+      COUNT(*) FILTER (WHERE position > 1) AS extra_rows,
+      SUM(applied_quantity) FILTER (WHERE position > 1) AS extra_applied_units
+    FROM ranked
+    GROUP BY tenant_id
+    HAVING COUNT(*) FILTER (WHERE position > 1) > 0
+  `);
+
+  console.log(JSON.stringify({
+    event: "inventory.duplicate_amazon_sale_lines",
+    tenants: result.rows.map((row) => ({
+      tenantId: row.tenant_id,
+      extraRows: Number(row.extra_rows),
+      extraAppliedUnits: Number(row.extra_applied_units ?? 0),
+    })),
+  }));
+}
+
 export async function initializeInventoryStore() {
   const inventoryPool = getPool();
 
@@ -1511,6 +1553,20 @@ async function upsertAmazonSalesLine(
   line: ReturnType<typeof normalizeAmazonSalesLine>,
   now: Date
 ) {
+  // Amazon order item IDs are unique per seller. Re-authorizations used to
+  // create new connection IDs, so reuse the connection an order item was
+  // first stored under; otherwise the same sale would be applied twice.
+  const existing = await client.query<{ connection_id: string }>(
+    `
+      SELECT connection_id FROM scanneraz_inventory_amazon_order_lines
+      WHERE tenant_id = $1 AND amazon_order_id = $2 AND amazon_order_item_id = $3
+      ORDER BY created_at ASC
+      LIMIT 1
+    `,
+    [tenantId, line.orderId, line.orderItemId]
+  );
+  connectionId = existing.rows[0]?.connection_id ?? connectionId;
+
   const result = await client.query<AmazonSaleLineRow>(
     `
       INSERT INTO scanneraz_inventory_amazon_order_lines (

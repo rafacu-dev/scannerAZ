@@ -26,7 +26,7 @@ import { initializeRestockStore } from "./amazon/restock.js";
 import { initializePushStore, notificationsRouter } from "./notifications/push.js";
 import { amazonRouter } from "./amazon/routes.js";
 import { inventoryRouter } from "./inventory/routes.js";
-import { initializeInventoryStore } from "./inventory/store.js";
+import { initializeInventoryStore, reportDuplicateAmazonSaleLines } from "./inventory/store.js";
 import {
   clearSessionCookie,
   endRequestSession,
@@ -724,6 +724,9 @@ async function startServer() {
     await initializeRestockStore();
     await initializePushStore();
     await consolidateDuplicateAmazonConnections();
+    void reportDuplicateAmazonSaleLines().catch((error) => {
+      console.error("Could not report duplicate Amazon sale lines", error);
+    });
     app.listen(config.PORT, () => {
       console.log(`ScannerAz listening at ${config.APP_BASE_URL}`);
     });
