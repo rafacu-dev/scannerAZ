@@ -1845,6 +1845,28 @@ async function reconcileAmazonSalesLine(
     appliedQuantity += allocationQuantity;
   }
 
+  // Sold before bought: record the rest without a lot so stock goes negative
+  // ("to buy"); a later receipt's lot absorbs it first (FIFO).
+  const backorderQuantity = quantityToApply - allocationQuantity;
+
+  if (backorderQuantity > 0) {
+    await insertMovement(client, {
+      tenantId,
+      productId: matchedProduct.id,
+      movementType: "sale",
+      quantityDelta: -backorderQuantity,
+      condition: line.condition,
+      channel: line.fulfilledBy === "AMAZON" ? "Amazon FBA" : "Amazon FBM",
+      reference: line.orderId,
+      notes: "Sincronizado desde Amazon Orders API · Pendiente de comprar",
+      sourceType: "amazon_order_item",
+      sourceId: source.id,
+      occurredAt,
+      createdAt: now
+    });
+    appliedQuantity += backorderQuantity;
+  }
+
   const status: AmazonSaleSyncStatus = appliedQuantity >= desiredQuantity
     ? "applied"
     : "insufficient_stock";
@@ -1859,7 +1881,7 @@ async function reconcileAmazonSalesLine(
       : undefined
   });
 
-  return { status, appliedUnits: allocationQuantity, reversedUnits };
+  return { status, appliedUnits: allocationQuantity + backorderQuantity, reversedUnits };
 }
 
 function normalizeAmazonSalesLine(input: AmazonInventorySalesLine) {

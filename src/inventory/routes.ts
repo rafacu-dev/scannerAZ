@@ -68,9 +68,10 @@ const invoiceUpload = multer({
 
 // searchOrders has a conservative default usage plan. A tenant can continue a
 // paginated sync, but cannot turn the action into a rapid polling loop.
+// The app syncs every linked store when Inventory opens; allow a few stores.
 const amazonSalesSyncRateLimit = rateLimit({
   windowMs: 60 * 1000,
-  limit: 4,
+  limit: 12,
   legacyHeaders: false,
   standardHeaders: true,
   keyGenerator: (req) => req.scannerazTenantSession?.tenantId ?? "missing-tenant",
