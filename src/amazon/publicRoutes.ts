@@ -1188,6 +1188,101 @@ function titleTokens(value: string) {
     .filter((token) => token.length >= 2);
 }
 
+const listingImageCache = new Map<string, string>();
+
+/** Every active listing of a store, paged once and cached for 10 minutes. */
+async function loadAllStoreListings(
+  connectionId: string,
+  connection: { sellerId?: string; refreshToken: string; marketplaceId?: string }
+) {
+  const cached = storeListingsCache.get(connectionId);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.listings;
+  }
+
+  const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+  const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+  const listings: AmazonPricingListing[] = [];
+  let pageToken: string | undefined;
+  let pages = 0;
+
+  do {
+    const response = await searchSellerListings({
+      sellerId: connection.sellerId!,
+      refreshToken: connection.refreshToken,
+      accessToken,
+      marketplaceId,
+      pageSize: 20,
+      pageToken,
+    });
+    const page = normalizePricingListings(response, marketplaceId);
+    listings.push(...page.listings);
+    pageToken = page.nextPageToken;
+    pages += 1;
+  } while (pageToken && pages < 50);
+
+  storeListingsCache.set(connectionId, { listings, expiresAt: Date.now() + storeListingsCacheTtlMs });
+  return listings;
+}
+
+/**
+ * All of a store's active listings with images, for the Stock view. Images
+ * are looked up 20 ASINs at a time and cached by ASIN.
+ */
+publicAmazonRouter.get("/connections/:connectionId/listings/all", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection?.sellerId) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const listings = await loadAllStoreListings(connectionId, connection);
+    const missing = [...new Set(listings
+      .map((listing) => listing.asin?.toUpperCase())
+      .filter((asin): asin is string => Boolean(asin) && !listingImageCache.has(asin!)))].slice(0, 200);
+
+    if (missing.length) {
+      const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+
+      for (let index = 0; index < missing.length; index += 20) {
+        const chunk = missing.slice(index, index + 20).map((asin) => ({ asin } as AmazonPricingListing & { sku: string }));
+        const withImages = await attachCatalogImagesToPricingListings({
+          listings: chunk.map((entry) => ({ ...entry, sku: entry.asin! })),
+          refreshToken: connection.refreshToken,
+          accessToken,
+          marketplaceId,
+        });
+
+        for (const entry of withImages as Array<AmazonPricingListing & { imageUrl?: string }>) {
+          if (entry.asin && entry.imageUrl) {
+            listingImageCache.set(entry.asin.toUpperCase(), entry.imageUrl);
+          }
+        }
+      }
+    }
+
+    res.json({
+      connectionId,
+      listings: listings.map((listing) => ({
+        sku: listing.sku,
+        asin: listing.asin,
+        title: listing.title,
+        price: listing.price,
+        imageUrl: listing.asin ? listingImageCache.get(listing.asin.toUpperCase()) : undefined,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /**
  * Search this store's own listings by title. The catalog keyword search can
  * miss a seller's product when Amazon titles it differently, so receipts are
@@ -1215,32 +1310,7 @@ publicAmazonRouter.post("/connections/:connectionId/listings/search", async (req
 
     assertAmazonSpApiConfig(connection.refreshToken);
     const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
-    let cached = storeListingsCache.get(connectionId);
-
-    if (!cached || cached.expiresAt < Date.now()) {
-      const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
-      const listings: AmazonPricingListing[] = [];
-      let pageToken: string | undefined;
-      let pages = 0;
-
-      do {
-        const response = await searchSellerListings({
-          sellerId: connection.sellerId,
-          refreshToken: connection.refreshToken,
-          accessToken,
-          marketplaceId,
-          pageSize: 20,
-          pageToken,
-        });
-        const page = normalizePricingListings(response, marketplaceId);
-        listings.push(...page.listings);
-        pageToken = page.nextPageToken;
-        pages += 1;
-      } while (pageToken && pages < 50);
-
-      cached = { listings, expiresAt: Date.now() + storeListingsCacheTtlMs };
-      storeListingsCache.set(connectionId, cached);
-    }
+    const cached = { listings: await loadAllStoreListings(connectionId, connection) };
 
     const scored = cached.listings
       .map((listing) => {
