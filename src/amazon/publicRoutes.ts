@@ -1176,6 +1176,98 @@ publicAmazonRouter.post("/connections/:connectionId/listings/prices", async (req
   }
 });
 
+const storeListingsCache = new Map<string, { expiresAt: number; listings: AmazonPricingListing[] }>();
+const storeListingsCacheTtlMs = 10 * 60 * 1000;
+
+function titleTokens(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 2);
+}
+
+/**
+ * Search this store's own listings by title. The catalog keyword search can
+ * miss a seller's product when Amazon titles it differently, so receipts are
+ * matched against the store's listings directly. Listings are paged once and
+ * cached briefly.
+ */
+publicAmazonRouter.post("/connections/:connectionId/listings/search", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection?.sellerId) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const query = String(req.body?.query ?? "").trim().slice(0, 300);
+    const queryTokens = [...new Set(titleTokens(query))];
+
+    if (!queryTokens.length) {
+      res.status(400).json({ error: "query is required" });
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    let cached = storeListingsCache.get(connectionId);
+
+    if (!cached || cached.expiresAt < Date.now()) {
+      const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+      const listings: AmazonPricingListing[] = [];
+      let pageToken: string | undefined;
+      let pages = 0;
+
+      do {
+        const response = await searchSellerListings({
+          sellerId: connection.sellerId,
+          refreshToken: connection.refreshToken,
+          accessToken,
+          marketplaceId,
+          pageSize: 20,
+          pageToken,
+        });
+        const page = normalizePricingListings(response, marketplaceId);
+        listings.push(...page.listings);
+        pageToken = page.nextPageToken;
+        pages += 1;
+      } while (pageToken && pages < 50);
+
+      cached = { listings, expiresAt: Date.now() + storeListingsCacheTtlMs };
+      storeListingsCache.set(connectionId, cached);
+    }
+
+    const scored = cached.listings
+      .map((listing) => {
+        const tokens = new Set(titleTokens(listing.title ?? ""));
+        const hits = queryTokens.filter((token) => tokens.has(token)).length;
+        return { listing, score: hits / queryTokens.length };
+      })
+      .filter((entry) => entry.score >= 0.4)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 10);
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    const withImages = await attachCatalogImagesToPricingListings({
+      listings: scored.map((entry) => entry.listing),
+      refreshToken: connection.refreshToken,
+      accessToken,
+      marketplaceId,
+    });
+
+    res.json({
+      connectionId,
+      listings: withImages.map((listing, index) => ({ ...listing, score: scored[index]?.score })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 publicAmazonRouter.delete("/connections/:connectionId", async (req, res, next) => {
   try {
     const tenantId = requireTenantId(req);
