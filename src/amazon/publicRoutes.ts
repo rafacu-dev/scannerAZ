@@ -11,6 +11,10 @@ import {
   type AmazonFinancialEventGroup,
   type AmazonPricingListing,
   buildAmazonReleaseCalendar,
+  buildPreliminaryReleaseCalendar,
+  listAmazonRecentOrders,
+  preliminaryFeeRate,
+  type AmazonRecentOrder,
   getAmazonFinancialEventGroups,
   getAmazonItemOffersBatch,
   getAmazonSellerStoreName,
@@ -684,14 +688,24 @@ publicAmazonRouter.get("/connections/:connectionId/finances/release-calendar", a
         throw error;
       }
 
-      res.json({
+      const preliminary = await buildPreliminaryReleaseEstimate({
+        refreshToken: connection.refreshToken,
+        accessToken,
+        marketplaceId,
+        now,
+      });
+      const value = {
         connectionId,
         marketplaceId,
         authorizationRequired: true,
         error: "Amazon requires the Finance and Accounting role to read payouts.",
         days: [],
         transfers: [],
-      });
+        preliminary,
+      };
+
+      releaseCalendarCache.set(cacheKey, { value, expiresAt: now + releaseCalendarCacheTtlMs });
+      res.json(value);
       return;
     }
 
@@ -893,6 +907,56 @@ publicAmazonRouter.put("/connections/:connectionId/repricing/rules/:sku", async 
     next(error);
   }
 });
+
+/**
+ * Preliminary payout calendar from the last 30 days of orders, used while the
+ * Finance and Accounting role is not authorized. Orders may need their own
+ * role; when Amazon refuses, the caller learns that instead of an estimate.
+ */
+async function buildPreliminaryReleaseEstimate(input: {
+  refreshToken: string;
+  accessToken: string;
+  marketplaceId: string;
+  now: number;
+}) {
+  const orders: AmazonRecentOrder[] = [];
+  let nextToken: string | undefined;
+  let pages = 0;
+
+  try {
+    do {
+      const page = await listAmazonRecentOrders({
+        refreshToken: input.refreshToken,
+        accessToken: input.accessToken,
+        marketplaceId: input.marketplaceId,
+        createdAfter: new Date(input.now - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        nextToken,
+      });
+      orders.push(...page.orders);
+      nextToken = page.nextToken;
+      pages += 1;
+    } while (nextToken && pages < 5);
+  } catch (error) {
+    return {
+      available: false,
+      ordersAuthorizationRequired: isAmazonAuthorizationFailure(error),
+      days: [],
+    };
+  }
+
+  const days = buildPreliminaryReleaseCalendar(orders, new Date(input.now));
+
+  return {
+    available: true,
+    ordersAuthorizationRequired: false,
+    feeRate: preliminaryFeeRate,
+    orderCount: orders.length,
+    truncated: Boolean(nextToken),
+    currency: days[0]?.currency,
+    totalPending: Math.round(days.reduce((sum, day) => sum + day.amount, 0) * 100) / 100,
+    days,
+  };
+}
 
 publicAmazonRouter.delete("/connections/:connectionId", async (req, res, next) => {
   try {

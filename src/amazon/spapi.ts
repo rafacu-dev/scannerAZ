@@ -621,6 +621,116 @@ export function normalizeAmazonDeferredTransactions(value: unknown): {
  * Sums deferred transactions by their UTC release day. Amounts are net:
  * refunds and fees that mature on the same day reduce that day's release.
  */
+/** Order totals and delivery windows used for a preliminary payout estimate. */
+export type AmazonRecentOrder = {
+  orderId: string;
+  status?: string;
+  purchaseDate?: string;
+  latestShipDate?: string;
+  latestDeliveryDate?: string;
+  fulfillmentChannel?: string;
+  amount?: number;
+  currency?: string;
+};
+
+/**
+ * Orders v0 getOrders: one page of recent orders with totals and delivery
+ * windows. Only non-PII fields are read.
+ */
+export async function listAmazonRecentOrders(input: {
+  refreshToken: string;
+  accessToken?: string;
+  createdAfter: string;
+  marketplaceId?: string;
+  nextToken?: string;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL("/orders/v0/orders", endpoint);
+  url.searchParams.set("MarketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
+
+  if (input.nextToken) {
+    url.searchParams.set("NextToken", input.nextToken);
+  } else {
+    url.searchParams.set("CreatedAfter", input.createdAfter);
+    url.searchParams.set("OrderStatuses", "Unshipped,PartiallyShipped,Shipped");
+    url.searchParams.set("MaxResultsPerPage", "100");
+  }
+
+  const response = await fetch(url, { headers: spApiReadHeaders(accessToken) });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Orders", response.status, parsedBody, "Inventory and Order Tracking"));
+  }
+
+  const payload = asRecord(recordValue(asRecord(parsedBody), ["payload"]));
+  const orders = recordArray(recordValue(payload, ["Orders"])).map((order): AmazonRecentOrder => {
+    const total = asRecord(recordValue(order, ["OrderTotal"]));
+
+    return {
+      orderId: stringValue(recordValue(order, ["AmazonOrderId"])) ?? "",
+      status: stringValue(recordValue(order, ["OrderStatus"])),
+      purchaseDate: stringValue(recordValue(order, ["PurchaseDate"])),
+      latestShipDate: stringValue(recordValue(order, ["LatestShipDate"])),
+      latestDeliveryDate: stringValue(recordValue(order, ["LatestDeliveryDate"])),
+      fulfillmentChannel: stringValue(recordValue(order, ["FulfillmentChannel"])),
+      amount: numberValue(recordValue(total, ["Amount"])),
+      currency: stringValue(recordValue(total, ["CurrencyCode"])),
+    };
+  }).filter((order) => Boolean(order.orderId));
+
+  return { orders, nextToken: stringValue(recordValue(payload, ["NextToken"])) };
+}
+
+/** Approximate referral fee withheld before payout; real fees vary by category. */
+export const preliminaryFeeRate = 0.15;
+const dayMs = 24 * 60 * 60 * 1000;
+
+/**
+ * Preliminary release calendar from orders: Amazon holds sale funds until
+ * 7 days after delivery (DD+7). Delivery uses the order's latest delivery
+ * date, else latest ship date + 5 days, else purchase date + 7 days.
+ * Amounts are order totals minus an approximate fee. Only future releases.
+ */
+export function buildPreliminaryReleaseCalendar(orders: AmazonRecentOrder[], now = new Date()) {
+  const today = now.toISOString().slice(0, 10);
+  const transactions: AmazonDeferredTransaction[] = orders.flatMap((order) => {
+    if (order.amount === undefined || order.amount <= 0) {
+      return [];
+    }
+
+    const delivery = order.latestDeliveryDate
+      ? new Date(order.latestDeliveryDate).getTime()
+      : order.latestShipDate
+        ? new Date(order.latestShipDate).getTime() + 5 * dayMs
+        : order.purchaseDate
+          ? new Date(order.purchaseDate).getTime() + 7 * dayMs
+          : undefined;
+
+    if (delivery === undefined || Number.isNaN(delivery)) {
+      return [];
+    }
+
+    const maturityDate = new Date(delivery + 7 * dayMs).toISOString();
+
+    if (maturityDate.slice(0, 10) < today) {
+      return [];
+    }
+
+    return [{
+      id: order.orderId,
+      orderId: order.orderId,
+      maturityDate,
+      amount: Math.round(order.amount * (1 - preliminaryFeeRate) * 100) / 100,
+      currency: order.currency,
+    }];
+  });
+
+  return buildAmazonReleaseCalendar(transactions);
+}
+
 export function buildAmazonReleaseCalendar(transactions: AmazonDeferredTransaction[]): AmazonReleaseCalendarDay[] {
   const days = new Map<string, AmazonReleaseCalendarDay>();
 

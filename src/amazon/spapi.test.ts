@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   applyAmazonSellerStoreName,
   buildAmazonReleaseCalendar,
+  buildPreliminaryReleaseCalendar,
   buildAmazonItemOffersBatchRequest,
   buildAmazonCatalogSearchUrl,
   buildAmazonOrdersSearchUrl,
@@ -522,4 +523,18 @@ test("flags Amazon-fulfilled listings as not restockable", () => {
 
   assert.equal(prepared.fulfillment, "amazon");
   assert.equal(prepared.currentQuantity, undefined);
+});
+
+test("estimates releases 7 days after delivery, net of an approximate fee", () => {
+  const days = buildPreliminaryReleaseCalendar([
+    { orderId: "1", amount: 100, currency: "USD", latestDeliveryDate: "2026-10-05T07:00:00Z" },
+    { orderId: "2", amount: 20, currency: "USD", latestShipDate: "2026-10-01T07:00:00Z" },
+    { orderId: "3", amount: 50, currency: "USD", latestDeliveryDate: "2026-09-01T07:00:00Z" },
+    { orderId: "4", currency: "USD", latestDeliveryDate: "2026-10-05T07:00:00Z" }
+  ], new Date("2026-10-03T12:00:00Z"));
+
+  assert.deepEqual(days, [
+    { date: "2026-10-12", amount: 85, currency: "USD", transactionCount: 1 },
+    { date: "2026-10-13", amount: 17, currency: "USD", transactionCount: 1 }
+  ]);
 });
