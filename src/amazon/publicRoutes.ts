@@ -1442,6 +1442,52 @@ publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req,
       return [...counts.entries()].sort((left, right) => right[1] - left[1]);
     };
 
+    const listings = await loadAllStoreListings(connectionId, connection).catch(() => []);
+    const listingBySku = new Map(listings.map((listing) => [listing.sku.trim().toLowerCase(), listing]));
+    const listingByAsin = new Map(listings
+      .filter((listing) => listing.asin)
+      .map((listing) => [listing.asin!.trim().toUpperCase(), listing]));
+    const productCounts = new Map<string, { sku?: string; asin?: string; title: string; units: number }>();
+
+    for (const row of rows) {
+      const listing = row.asin ? listingByAsin.get(row.asin.toUpperCase()) : undefined;
+      const listingByRowSku = row.sku ? listingBySku.get(row.sku.toLowerCase()) : undefined;
+      const match = listingByRowSku ?? listing;
+      const reportTitle = row.title?.trim();
+      const looksLikeIdentifier = Boolean(reportTitle && (/^[A-Z0-9_-]{3,40}$/i.test(reportTitle) || reportTitle === row.sku || reportTitle === row.asin));
+      const title = (!looksLikeIdentifier && reportTitle) || match?.title || reportTitle || row.asin || row.sku || "Producto sin nombre";
+      const key = (row.asin || row.sku || title).toLowerCase();
+      const current = productCounts.get(key) ?? { sku: row.sku, asin: row.asin, title, units: 0 };
+      current.units += row.quantity;
+      productCounts.set(key, current);
+    }
+
+    const reasonLabel = (reason?: string) => {
+      const normalized = reason?.trim().toLowerCase().replace(/[_-]+/g, " ");
+      const labels: Record<string, string> = {
+        "no longer needed": "Ya no lo necesita",
+        "not as expected": "No era lo esperado",
+        "defective": "Defectuoso o no funciona",
+        "damaged": "Dañado",
+        "wrong item": "Artículo equivocado",
+        "missing parts": "Faltan piezas",
+        "better price found": "Encontró un precio mejor",
+        "ordered by mistake": "Pedido por error",
+        "changed mind": "Cambió de opinión",
+        "not as described": "No coincide con la descripción",
+        "arrived late": "Llegó tarde",
+        "customer damaged": "Dañado por el cliente",
+        "missing item": "Falta el artículo",
+      };
+      if (labels[normalized ?? ""]) {
+        return labels[normalized ?? ""];
+      }
+
+      return reason
+        ? reason.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+        : "Motivo no especificado";
+    };
+
     const value = {
       connectionId,
       days: returnsWindowDays,
@@ -1450,8 +1496,10 @@ publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req,
       returnedUnits: rows.reduce((sum, row) => sum + row.quantity, 0),
       returnRequests: rows.length,
       soldUnits: await soldAmazonUnitsSince(tenantId, connectionId, since),
-      topSkus: countBy((row) => row.sku).slice(0, 5).map(([sku, units]) => ({ sku, units })),
-      topReasons: countBy((row) => row.reason).slice(0, 3).map(([reason, units]) => ({ reason, units })),
+      topSkus: [...productCounts.values()]
+        .sort((left, right) => right.units - left.units)
+        .slice(0, 5),
+      topReasons: countBy((row) => reasonLabel(row.reason)).slice(0, 3).map(([reason, units]) => ({ reason, units })),
       statuses: countBy((row) => row.status).map(([status, units]) => ({ status, units })),
     };
 
