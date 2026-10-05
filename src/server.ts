@@ -338,7 +338,7 @@ app.use(requireTrustedEdge);
 app.use(express.static(publicDir));
 
 app.get("/", (_req, res) => {
-  res.sendFile(path.join(publicDir, "index.html"));
+  res.redirect(302, "/scanneraz/");
 });
 
 // Called by the external scheduler (about every 5 minutes). It only starts a
