@@ -64,7 +64,13 @@ import {
   registerAccount,
   usesManagedAccountStore
 } from "./storage/accounts.js";
-import { EmailDeliveryError, EmailUnavailableError, isEmailConfigured, sendSignInCodeEmail } from "./auth/mailer.js";
+import {
+  EmailDeliveryError,
+  emailLocaleFrom,
+  EmailUnavailableError,
+  isEmailConfigured,
+  sendSignInCodeEmail
+} from "./auth/mailer.js";
 import { keepaRouter } from "./keepa/routes.js";
 import { retailRouter } from "./retail/routes.js";
 import "./retail/target/clearance.js";
@@ -425,7 +431,7 @@ app.post("/auth/scanneraz/email-code", requirePublicAppAccess, emailCodeRateLimi
     const created = await createEmailSignInCode(String(req.body?.email ?? ""));
     email = created.email;
     const { code, expiresInSeconds } = created;
-    await sendSignInCodeEmail(email, code);
+    await sendSignInCodeEmail(email, code, emailLocaleFrom(req.body?.locale));
     res.setHeader("cache-control", "no-store");
     res.status(202).json({ sent: true, expiresInSeconds });
   } catch (error) {

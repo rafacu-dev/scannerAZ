@@ -41,21 +41,47 @@ function getTransporter() {
   return transporter;
 }
 
-export async function sendSignInCodeEmail(to: string, code: string) {
+export type EmailLocale = "es" | "en";
+
+const brandName = "SellerAI";
+
+// Sign-in email copy per app language; the app sends its current language.
+const signInCopy: Record<EmailLocale, {
+  subject: (code: string) => string;
+  intro: string;
+  textIntro: (code: string) => string;
+  expiry: string;
+}> = {
+  es: {
+    subject: (code) => `${code} es tu código de ${brandName}`,
+    intro: "Tu código para entrar es:",
+    textIntro: (code) => `Tu código para entrar en ${brandName} es: ${code}`,
+    expiry: "Caduca en 10 minutos. Si no lo pediste, puedes ignorar este correo."
+  },
+  en: {
+    subject: (code) => `${code} is your ${brandName} code`,
+    intro: "Your sign-in code is:",
+    textIntro: (code) => `Your ${brandName} sign-in code is: ${code}`,
+    expiry: "It expires in 10 minutes. If you didn't request it, you can ignore this email."
+  }
+};
+
+export function emailLocaleFrom(value: unknown): EmailLocale {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith("en") ? "en" : "es";
+}
+
+export async function sendSignInCodeEmail(to: string, code: string, locale: EmailLocale = "es") {
   const spacedCode = `${code.slice(0, 3)} ${code.slice(3)}`;
+  const copy = signInCopy[locale];
   const message = {
-    subject: `${spacedCode} es tu código de ScannerAz`,
-    text: [
-      `Tu código para entrar en ScannerAz es: ${spacedCode}`,
-      "",
-      "Caduca en 10 minutos. Si no lo pediste, puedes ignorar este correo."
-    ].join("\n"),
+    subject: copy.subject(spacedCode),
+    text: [copy.textIntro(spacedCode), "", copy.expiry].join("\n"),
     html: `
-      <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:420px;margin:0 auto;padding:32px 24px;color:#17202a">
-        <div style="font-size:20px;font-weight:800;color:#146eb4">ScannerAz</div>
-        <p style="font-size:16px;margin:24px 0 8px">Tu código para entrar es:</p>
+      <div lang="${locale}" style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:420px;margin:0 auto;padding:32px 24px;color:#17202a">
+        <div style="font-size:20px;font-weight:800;color:#146eb4">${brandName}</div>
+        <p style="font-size:16px;margin:24px 0 8px">${copy.intro}</p>
         <div style="font-size:34px;font-weight:800;letter-spacing:6px;background:#eaf3fb;color:#0d4f86;border-radius:12px;padding:16px;text-align:center">${spacedCode}</div>
-        <p style="font-size:14px;color:#687385;margin-top:20px">Caduca en 10 minutos. Si no lo pediste, puedes ignorar este correo.</p>
+        <p style="font-size:14px;color:#687385;margin-top:20px">${copy.expiry}</p>
       </div>
     `
   };
@@ -67,7 +93,7 @@ export async function sendSignInCodeEmail(to: string, code: string) {
     }
 
     await getTransporter().sendMail({
-      from: config.EMAIL_FROM,
+      from: { name: brandName, address: emailAddressFrom(config.EMAIL_FROM) },
       to,
       ...message
     });
@@ -105,7 +131,7 @@ async function sendWithHostingerMailApi(
     {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ to: [to], displayName: "ScannerAz", ...message })
+      body: JSON.stringify({ to: [to], displayName: brandName, ...message })
     }
   );
 
