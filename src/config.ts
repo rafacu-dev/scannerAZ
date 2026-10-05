@@ -69,7 +69,10 @@ const envSchema = z.object({
     .transform((value) => (value === undefined ? undefined : value === "true")),
   SMTP_USER: blankAsUndefined(z.string().trim().min(1).optional()),
   SMTP_PASS: blankAsUndefined(z.string().min(1).optional()),
-  EMAIL_FROM: blankAsUndefined(z.string().trim().min(3).default("ScannerAz <no-reply@warasoft.com>"))
+  EMAIL_FROM: blankAsUndefined(z.string().trim().min(3).default("ScannerAz <no-reply@warasoft.com>")),
+  // Render Free blocks outbound SMTP. This bearer token calls Hostinger Mail
+  // over HTTPS and must remain a Render-only secret.
+  HOSTINGER_MAIL_API_KEY: blankAsUndefined(z.string().min(1).optional())
 });
 
 export const config = envSchema.parse(process.env);

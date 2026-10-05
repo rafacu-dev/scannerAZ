@@ -68,6 +68,10 @@ services:
         value: https://warasoft.com/api/ai/v1/responses/
       - key: WARASOFT_AI_INVOICE_MODEL
         value: gpt-4o-mini
+      # Render Free blocks SMTP ports. Configure a scoped Hostinger Mail API
+      # token manually; the server discovers only its authorized mailbox.
+      - key: HOSTINGER_MAIL_API_KEY
+        sync: false
 
 databases:
   - name: scanneraz-db
