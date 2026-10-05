@@ -3,6 +3,10 @@ import { z } from "zod";
 
 dotenv.config();
 
+function blankAsUndefined<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((value) => (typeof value === "string" && value.trim() === "" ? undefined : value), schema);
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -56,15 +60,16 @@ const envSchema = z.object({
   ENCRYPTION_KEY: z.string().min(32).optional(),
   SESSION_SECRET: z.string().min(32).optional(),
   // Outgoing mail for sign-in codes. Set the SMTP_* values in Render only.
-  SMTP_HOST: z.string().trim().min(1).optional(),
-  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  // Blank values count as unset so a half-filled group never stops the boot.
+  SMTP_HOST: blankAsUndefined(z.string().trim().min(1).optional()),
+  SMTP_PORT: blankAsUndefined(z.coerce.number().int().positive().default(587)),
   SMTP_SECURE: z
     .enum(["true", "false"])
     .optional()
     .transform((value) => (value === undefined ? undefined : value === "true")),
-  SMTP_USER: z.string().trim().min(1).optional(),
-  SMTP_PASS: z.string().min(1).optional(),
-  EMAIL_FROM: z.string().trim().min(3).default("ScannerAz <no-reply@warasoft.com>")
+  SMTP_USER: blankAsUndefined(z.string().trim().min(1).optional()),
+  SMTP_PASS: blankAsUndefined(z.string().min(1).optional()),
+  EMAIL_FROM: blankAsUndefined(z.string().trim().min(3).default("ScannerAz <no-reply@warasoft.com>"))
 });
 
 export const config = envSchema.parse(process.env);
