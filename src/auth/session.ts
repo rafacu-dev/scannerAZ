@@ -61,7 +61,9 @@ export function setSessionCookie(res: express.Response, accessToken: string) {
 }
 
 export function clearSessionCookie(res: express.Response) {
-  res.clearCookie(sessionCookieName, getCookieOptions());
+  // Express 5 clears expiry itself. Passing maxAge here triggers a deprecation
+  // warning and can make a stale session cookie harder to diagnose.
+  res.clearCookie(sessionCookieName, getClearCookieOptions());
 }
 
 export async function endRequestSession(req: express.Request, res: express.Response) {
@@ -97,4 +99,9 @@ function getCookieOptions() {
     secure: config.APP_BASE_URL.startsWith("https://"),
     maxAge: sessionLifetimeMs
   };
+}
+
+function getClearCookieOptions() {
+  const { maxAge: _maxAge, ...options } = getCookieOptions();
+  return options;
 }

@@ -9,6 +9,19 @@ export class EmailUnavailableError extends Error {
   }
 }
 
+/** A configured provider that could not accept or deliver a message. */
+export class EmailDeliveryError extends Error {
+  readonly providerCode?: string;
+
+  constructor(error: unknown) {
+    super("Outgoing email could not be delivered");
+    this.name = "EmailDeliveryError";
+    this.providerCode = typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code ?? "") || undefined
+      : undefined;
+  }
+}
+
 export function isEmailConfigured() {
   return Boolean(config.SMTP_HOST && config.SMTP_USER && config.SMTP_PASS);
 }
@@ -31,22 +44,26 @@ function getTransporter() {
 export async function sendSignInCodeEmail(to: string, code: string) {
   const spacedCode = `${code.slice(0, 3)} ${code.slice(3)}`;
 
-  await getTransporter().sendMail({
-    from: config.EMAIL_FROM,
-    to,
-    subject: `${spacedCode} es tu código de ScannerAz`,
-    text: [
-      `Tu código para entrar en ScannerAz es: ${spacedCode}`,
-      "",
-      "Caduca en 10 minutos. Si no lo pediste, puedes ignorar este correo."
-    ].join("\n"),
-    html: `
-      <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:420px;margin:0 auto;padding:32px 24px;color:#17202a">
-        <div style="font-size:20px;font-weight:800;color:#146eb4">ScannerAz</div>
-        <p style="font-size:16px;margin:24px 0 8px">Tu código para entrar es:</p>
-        <div style="font-size:34px;font-weight:800;letter-spacing:6px;background:#eaf3fb;color:#0d4f86;border-radius:12px;padding:16px;text-align:center">${spacedCode}</div>
-        <p style="font-size:14px;color:#687385;margin-top:20px">Caduca en 10 minutos. Si no lo pediste, puedes ignorar este correo.</p>
-      </div>
-    `
-  });
+  try {
+    await getTransporter().sendMail({
+      from: config.EMAIL_FROM,
+      to,
+      subject: `${spacedCode} es tu código de ScannerAz`,
+      text: [
+        `Tu código para entrar en ScannerAz es: ${spacedCode}`,
+        "",
+        "Caduca en 10 minutos. Si no lo pediste, puedes ignorar este correo."
+      ].join("\n"),
+      html: `
+        <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:420px;margin:0 auto;padding:32px 24px;color:#17202a">
+          <div style="font-size:20px;font-weight:800;color:#146eb4">ScannerAz</div>
+          <p style="font-size:16px;margin:24px 0 8px">Tu código para entrar es:</p>
+          <div style="font-size:34px;font-weight:800;letter-spacing:6px;background:#eaf3fb;color:#0d4f86;border-radius:12px;padding:16px;text-align:center">${spacedCode}</div>
+          <p style="font-size:14px;color:#687385;margin-top:20px">Caduca en 10 minutos. Si no lo pediste, puedes ignorar este correo.</p>
+        </div>
+      `
+    });
+  } catch (error) {
+    throw new EmailDeliveryError(error);
+  }
 }

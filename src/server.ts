@@ -47,6 +47,7 @@ import {
   AccountNotFoundError,
   changeAccountPassword,
   createEmailSignInCode,
+  discardEmailSignInCodes,
   InvalidEmailCodeError,
   signInWithEmailCode,
   TooManyEmailCodesError,
@@ -62,7 +63,7 @@ import {
   registerAccount,
   usesManagedAccountStore
 } from "./storage/accounts.js";
-import { EmailUnavailableError, sendSignInCodeEmail } from "./auth/mailer.js";
+import { EmailDeliveryError, EmailUnavailableError, isEmailConfigured, sendSignInCodeEmail } from "./auth/mailer.js";
 import { keepaRouter } from "./keepa/routes.js";
 import { retailRouter } from "./retail/routes.js";
 import "./retail/target/clearance.js";
@@ -181,6 +182,11 @@ function getOAuthCookieOptions() {
   };
 }
 
+function getOAuthClearCookieOptions() {
+  const { maxAge: _maxAge, ...options } = getOAuthCookieOptions();
+  return options;
+}
+
 function getCookie(req: express.Request, name: string) {
   const cookies = req.headers.cookie?.split(";").map((cookie) => cookie.trim()) ?? [];
   const cookie = cookies.find((item) => item.startsWith(`${name}=`));
@@ -213,7 +219,7 @@ function continueAmazonWebsiteAuthorization(
   }
 
   res.cookie(oauthCookieName, state, getOAuthCookieOptions());
-  res.clearCookie(amazonWebsiteLoginCookieName, getOAuthCookieOptions());
+  res.clearCookie(amazonWebsiteLoginCookieName, getOAuthClearCookieOptions());
   res.redirect(callbackUrl.toString());
 }
 
@@ -408,13 +414,31 @@ app.post("/auth/scanneraz/register", requirePublicAppAccess, accountRateLimit, a
 
 // Passwordless sign-in: email a 6-digit code, then exchange it for a session.
 app.post("/auth/scanneraz/email-code", requirePublicAppAccess, emailCodeRateLimit, async (req, res, next) => {
+  let email = "";
+
   try {
-    const { email, code, expiresInSeconds } = await createEmailSignInCode(String(req.body?.email ?? ""));
+    if (!isEmailConfigured()) {
+      throw new EmailUnavailableError();
+    }
+
+    const created = await createEmailSignInCode(String(req.body?.email ?? ""));
+    email = created.email;
+    const { code, expiresInSeconds } = created;
     await sendSignInCodeEmail(email, code);
     res.setHeader("cache-control", "no-store");
     res.status(202).json({ sent: true, expiresInSeconds });
   } catch (error) {
-    if (error instanceof EmailUnavailableError) {
+    if (error instanceof EmailUnavailableError || error instanceof EmailDeliveryError) {
+      if (email) {
+        await discardEmailSignInCodes(email).catch(() => undefined);
+      }
+      if (error instanceof EmailDeliveryError) {
+        console.warn(JSON.stringify({
+          event: "auth.email_delivery_failed",
+          requestId: res.locals.requestId,
+          providerCode: error.providerCode
+        }));
+      }
       res.status(503).json({ error: "Email sign-in is not available yet.", code: "email_unavailable" });
       return;
     }
@@ -734,7 +758,7 @@ app.get("/auth/amazon/callback", async (req, res, next) => {
       return;
     }
 
-    res.clearCookie(oauthCookieName);
+    res.clearCookie(oauthCookieName, getOAuthClearCookieOptions());
     const oauthState = decodeState(state);
 
     if (oauthState.tenantId && !isPublicAppReady()) {
@@ -822,7 +846,8 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
       path: req.path,
       cfRay: req.get("cf-ray") || undefined,
       renderRequestId: req.get("rndr-id") || undefined,
-      errorName: error instanceof Error ? error.name : "UnknownError"
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      errorCode: error instanceof EmailDeliveryError ? error.providerCode : undefined
     })
   );
 

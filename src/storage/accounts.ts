@@ -526,6 +526,16 @@ export async function createEmailSignInCode(rawEmail: string) {
   return { email, code, expiresInSeconds: emailCodeLifetimeMs / 1000 };
 }
 
+/** Remove a code that could not be delivered, so it never consumes a retry. */
+export async function discardEmailSignInCodes(rawEmail: string) {
+  const accountPool = requirePool();
+  const email = normalizeEmail(rawEmail);
+  await accountPool.query(
+    "DELETE FROM scanneraz_email_codes WHERE email = $1 AND consumed_at IS NULL",
+    [email]
+  );
+}
+
 /**
  * Verifies a sign-in code and opens a session. When no account exists and
  * `allowSignup` is set, the account and its workspace are created here.
