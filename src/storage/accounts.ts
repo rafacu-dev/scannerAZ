@@ -17,7 +17,23 @@ export type TenantSession = {
   email: string;
   role: "owner" | "member";
   expiresAt: string;
+  profile?: AccountProfile;
 };
+
+export type SellerStage = "active" | "starting";
+
+export type AccountProfile = {
+  displayName?: string;
+  sellerStage?: SellerStage;
+  onboardedAt?: string;
+};
+
+/** Accounts created with an email code have no password to verify. */
+const emailCodeOnlyPasswordMarker = "email-code-only";
+const emailCodeLifetimeMs = 10 * 60 * 1000;
+const emailCodeMaxAttempts = 5;
+const emailCodesPerWindow = 5;
+const emailCodeWindowMs = 15 * 60 * 1000;
 
 export type NewAccountSession = TenantSession & {
   accessToken: string;
@@ -40,6 +56,9 @@ type SessionRow = {
   email: string;
   role: "owner" | "member";
   expires_at: Date | string;
+  display_name: string | null;
+  seller_stage: SellerStage | null;
+  onboarded_at: Date | string | null;
 };
 
 type AmazonMobileHandoffRow = {
@@ -62,6 +81,24 @@ export class InvalidCredentialsError extends Error {
 export class PasswordExpiredError extends Error {
   constructor() {
     super("Password has expired");
+  }
+}
+
+export class TooManyEmailCodesError extends Error {
+  constructor() {
+    super("Too many sign-in codes requested");
+  }
+}
+
+export class InvalidEmailCodeError extends Error {
+  constructor() {
+    super("The sign-in code is invalid or has expired");
+  }
+}
+
+export class AccountNotFoundError extends Error {
+  constructor() {
+    super("No account exists for this email address");
   }
 }
 
@@ -142,6 +179,26 @@ export async function initializeAccountStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_sessions_expires_at_idx
       ON scanneraz_sessions (expires_at);
+
+      ALTER TABLE scanneraz_users
+        ADD COLUMN IF NOT EXISTS display_name TEXT;
+      ALTER TABLE scanneraz_users
+        ADD COLUMN IF NOT EXISTS seller_stage TEXT;
+      ALTER TABLE scanneraz_users
+        ADD COLUMN IF NOT EXISTS onboarded_at TIMESTAMPTZ;
+
+      CREATE TABLE IF NOT EXISTS scanneraz_email_codes (
+        id BIGSERIAL PRIMARY KEY,
+        email TEXT NOT NULL,
+        code_hash TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        expires_at TIMESTAMPTZ NOT NULL,
+        consumed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_email_codes_email_created_idx
+      ON scanneraz_email_codes (email, created_at DESC);
 
       CREATE TABLE IF NOT EXISTS scanneraz_amazon_mobile_handoffs (
         ticket_hash TEXT PRIMARY KEY,
@@ -380,7 +437,10 @@ export async function getTenantSession(accessToken: string): Promise<TenantSessi
         scanneraz_sessions.tenant_id,
         scanneraz_users.email,
         scanneraz_tenant_memberships.role,
-        scanneraz_sessions.expires_at
+        scanneraz_sessions.expires_at,
+        scanneraz_users.display_name,
+        scanneraz_users.seller_stage,
+        scanneraz_users.onboarded_at
       FROM scanneraz_sessions
       JOIN scanneraz_users ON scanneraz_users.id = scanneraz_sessions.user_id
       JOIN scanneraz_tenant_memberships
@@ -403,8 +463,212 @@ export async function getTenantSession(accessToken: string): Promise<TenantSessi
     tenantId: row.tenant_id,
     email: row.email,
     role: row.role,
-    expiresAt: new Date(row.expires_at).toISOString()
+    expiresAt: new Date(row.expires_at).toISOString(),
+    profile: profileFromRow(row)
   };
+}
+
+function profileFromRow(row: Pick<SessionRow, "display_name" | "seller_stage" | "onboarded_at">): AccountProfile {
+  return {
+    displayName: row.display_name ?? undefined,
+    sellerStage: row.seller_stage ?? undefined,
+    onboardedAt: row.onboarded_at ? new Date(row.onboarded_at).toISOString() : undefined
+  };
+}
+
+function hashEmailCode(email: string, code: string) {
+  const secret = config.SESSION_SECRET ?? config.ENCRYPTION_KEY;
+  const value = `${email}:${code}`;
+
+  return secret
+    ? crypto.createHmac("sha256", secret).update(value, "utf8").digest("base64url")
+    : crypto.createHash("sha256").update(value, "utf8").digest("base64url");
+}
+
+/**
+ * Creates a 6-digit sign-in code for an email address. Only its hash is
+ * stored; the caller sends the plain code by email.
+ */
+export async function createEmailSignInCode(rawEmail: string) {
+  const accountPool = requirePool();
+  await initializeAccountStore();
+  const email = normalizeEmail(rawEmail);
+  const recent = await accountPool.query<{ count: string }>(
+    `
+      SELECT COUNT(*) AS count
+      FROM scanneraz_email_codes
+      WHERE email = $1 AND created_at > $2
+    `,
+    [email, new Date(Date.now() - emailCodeWindowMs)]
+  );
+
+  if (Number(recent.rows[0]?.count ?? 0) >= emailCodesPerWindow) {
+    throw new TooManyEmailCodesError();
+  }
+
+  const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+  const now = new Date();
+
+  // A new code replaces any earlier one for this email.
+  await accountPool.query(
+    "UPDATE scanneraz_email_codes SET consumed_at = $2 WHERE email = $1 AND consumed_at IS NULL",
+    [email, now]
+  );
+  await accountPool.query(
+    `
+      INSERT INTO scanneraz_email_codes (email, code_hash, expires_at, created_at)
+      VALUES ($1, $2, $3, $4)
+    `,
+    [email, hashEmailCode(email, code), new Date(now.getTime() + emailCodeLifetimeMs), now]
+  );
+  await accountPool.query("DELETE FROM scanneraz_email_codes WHERE created_at < NOW() - INTERVAL '1 day'");
+
+  return { email, code, expiresInSeconds: emailCodeLifetimeMs / 1000 };
+}
+
+/**
+ * Verifies a sign-in code and opens a session. When no account exists and
+ * `allowSignup` is set, the account and its workspace are created here.
+ */
+export async function signInWithEmailCode(input: {
+  email: string;
+  code: string;
+  allowSignup: boolean;
+}): Promise<NewAccountSession & { isNewAccount: boolean }> {
+  const accountPool = requirePool();
+  await initializeAccountStore();
+  const email = normalizeEmail(input.email);
+  const code = input.code.replace(/\D/g, "");
+  const result = await accountPool.query<{ id: string; code_hash: string; attempts: number }>(
+    `
+      SELECT id, code_hash, attempts
+      FROM scanneraz_email_codes
+      WHERE email = $1 AND consumed_at IS NULL AND expires_at > NOW()
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [email]
+  );
+  const row = result.rows[0];
+
+  if (!row || row.attempts >= emailCodeMaxAttempts || code.length !== 6) {
+    if (row) {
+      await accountPool.query("UPDATE scanneraz_email_codes SET attempts = attempts + 1 WHERE id = $1", [row.id]);
+    }
+    throw new InvalidEmailCodeError();
+  }
+
+  const expected = Buffer.from(row.code_hash);
+  const actual = Buffer.from(hashEmailCode(email, code));
+
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+    await accountPool.query("UPDATE scanneraz_email_codes SET attempts = attempts + 1 WHERE id = $1", [row.id]);
+    throw new InvalidEmailCodeError();
+  }
+
+  const account = await accountPool.query<{ user_id: string; tenant_id: string; role: "owner" | "member" }>(
+    `
+      SELECT scanneraz_users.id AS user_id, scanneraz_tenant_memberships.tenant_id, scanneraz_tenant_memberships.role
+      FROM scanneraz_users
+      JOIN scanneraz_tenant_memberships ON scanneraz_tenant_memberships.user_id = scanneraz_users.id
+      WHERE scanneraz_users.email = $1
+      ORDER BY scanneraz_tenant_memberships.role = 'owner' DESC
+      LIMIT 1
+    `,
+    [email]
+  );
+  const existing = account.rows[0];
+
+  if (!existing && !input.allowSignup) {
+    // Keep the code usable so the app can switch to "create account".
+    throw new AccountNotFoundError();
+  }
+
+  await accountPool.query("UPDATE scanneraz_email_codes SET consumed_at = NOW() WHERE id = $1", [row.id]);
+
+  if (existing) {
+    // A verified email code also clears any password lockout.
+    await accountPool.query(
+      "UPDATE scanneraz_users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1",
+      [existing.user_id]
+    );
+    const session = await insertSession(accountPool, {
+      userId: existing.user_id,
+      tenantId: existing.tenant_id,
+      email,
+      role: existing.role
+    });
+    return { ...session, profile: await getAccountProfile(existing.user_id), isNewAccount: false };
+  }
+
+  const userId = crypto.randomUUID();
+  const tenantId = crypto.randomUUID();
+  const createdAt = new Date();
+  const client = await accountPool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `
+        INSERT INTO scanneraz_users (id, email, password_hash, password_changed_at, created_at)
+        VALUES ($1, $2, $3, $4, $4)
+      `,
+      [userId, email, emailCodeOnlyPasswordMarker, createdAt]
+    );
+    await client.query(
+      "INSERT INTO scanneraz_tenants (id, name, created_at) VALUES ($1, $2, $3)",
+      [tenantId, "Personal workspace", createdAt]
+    );
+    await client.query(
+      `
+        INSERT INTO scanneraz_tenant_memberships (tenant_id, user_id, role, created_at)
+        VALUES ($1, $2, 'owner', $3)
+      `,
+      [tenantId, userId, createdAt]
+    );
+    const session = await insertSession(client, { userId, tenantId, email, role: "owner" });
+    await client.query("COMMIT");
+    return { ...session, profile: {}, isNewAccount: true };
+  } catch (error) {
+    await client.query("ROLLBACK");
+
+    if (isUniqueViolation(error)) {
+      throw new AccountAlreadyExistsError();
+    }
+
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getAccountProfile(userId: string): Promise<AccountProfile> {
+  const accountPool = requirePool();
+  await initializeAccountStore();
+  const result = await accountPool.query<Pick<SessionRow, "display_name" | "seller_stage" | "onboarded_at">>(
+    "SELECT display_name, seller_stage, onboarded_at FROM scanneraz_users WHERE id = $1",
+    [userId]
+  );
+  return result.rows[0] ? profileFromRow(result.rows[0]) : {};
+}
+
+export async function updateAccountProfile(
+  userId: string,
+  input: { displayName?: string; sellerStage?: SellerStage; onboarded?: boolean }
+): Promise<AccountProfile> {
+  const accountPool = requirePool();
+  await initializeAccountStore();
+  await accountPool.query(
+    `
+      UPDATE scanneraz_users
+      SET display_name = COALESCE($2, display_name),
+          seller_stage = COALESCE($3, seller_stage),
+          onboarded_at = CASE WHEN $4::boolean THEN COALESCE(onboarded_at, NOW()) ELSE onboarded_at END
+      WHERE id = $1
+    `,
+    [userId, input.displayName ?? null, input.sellerStage ?? null, Boolean(input.onboarded)]
+  );
+  return getAccountProfile(userId);
 }
 
 export async function deleteTenantSession(accessToken: string) {

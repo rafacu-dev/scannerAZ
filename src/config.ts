@@ -54,7 +54,17 @@ const envSchema = z.object({
     .default("false")
     .transform((value) => value === "true"),
   ENCRYPTION_KEY: z.string().min(32).optional(),
-  SESSION_SECRET: z.string().min(32).optional()
+  SESSION_SECRET: z.string().min(32).optional(),
+  // Outgoing mail for sign-in codes. Set the SMTP_* values in Render only.
+  SMTP_HOST: z.string().trim().min(1).optional(),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_SECURE: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === "true")),
+  SMTP_USER: z.string().trim().min(1).optional(),
+  SMTP_PASS: z.string().min(1).optional(),
+  EMAIL_FROM: z.string().trim().min(3).default("ScannerAz <no-reply@warasoft.com>")
 });
 
 export const config = envSchema.parse(process.env);

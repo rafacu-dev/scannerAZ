@@ -44,7 +44,14 @@ import {
 } from "./storage/connections.js";
 import {
   AccountAlreadyExistsError,
+  AccountNotFoundError,
   changeAccountPassword,
+  createEmailSignInCode,
+  InvalidEmailCodeError,
+  signInWithEmailCode,
+  TooManyEmailCodesError,
+  updateAccountProfile,
+  type AccountProfile,
   consumeAmazonMobileHandoff,
   createAmazonMobileHandoff,
   initializeAccountStore,
@@ -55,6 +62,7 @@ import {
   registerAccount,
   usesManagedAccountStore
 } from "./storage/accounts.js";
+import { EmailUnavailableError, sendSignInCodeEmail } from "./auth/mailer.js";
 import { keepaRouter } from "./keepa/routes.js";
 import { retailRouter } from "./retail/routes.js";
 import "./retail/target/clearance.js";
@@ -110,6 +118,22 @@ const oauthRateLimit = rateLimit({
     });
   }
 });
+// Sign-in codes: generous per IP (typos, resends); per-email limits live in storage.
+const emailCodeRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  legacyHeaders: false,
+  standardHeaders: true,
+  handler: (req, res) => {
+    recordSecurityEvent("security.rate_limited", req, res, { scope: "scanneraz_email_code" });
+    res.status(429).json({
+      error: "Too many sign-in attempts. Try again later.",
+      code: "rate_limited",
+      requestId: res.locals.requestId
+    });
+  }
+});
+
 const accountRateLimit = rateLimit({
   windowMs: 60 * 60 * 1000,
   limit: 8,
@@ -382,6 +406,94 @@ app.post("/auth/scanneraz/register", requirePublicAppAccess, accountRateLimit, a
   }
 });
 
+// Passwordless sign-in: email a 6-digit code, then exchange it for a session.
+app.post("/auth/scanneraz/email-code", requirePublicAppAccess, emailCodeRateLimit, async (req, res, next) => {
+  try {
+    const { email, code, expiresInSeconds } = await createEmailSignInCode(String(req.body?.email ?? ""));
+    await sendSignInCodeEmail(email, code);
+    res.setHeader("cache-control", "no-store");
+    res.status(202).json({ sent: true, expiresInSeconds });
+  } catch (error) {
+    if (error instanceof EmailUnavailableError) {
+      res.status(503).json({ error: "Email sign-in is not available yet.", code: "email_unavailable" });
+      return;
+    }
+
+    if (error instanceof TooManyEmailCodesError) {
+      res.status(429).json({ error: "Too many codes requested. Wait a few minutes.", code: "too_many_codes" });
+      return;
+    }
+
+    if (error instanceof Error && /email/i.test(error.message)) {
+      res.status(400).json({ error: "Email address is invalid.", code: "invalid_email" });
+      return;
+    }
+
+    next(error);
+  }
+});
+
+app.post("/auth/scanneraz/email-code/verify", requirePublicAppAccess, emailCodeRateLimit, async (req, res, next) => {
+  try {
+    const intent = req.body?.intent === "signup" ? "signup" : "login";
+
+    if (intent === "signup" && !config.SCANNERAZ_PUBLIC_SIGNUP_ENABLED) {
+      res.status(503).json({ error: "ScannerAz public registration is not enabled yet.", code: "signup_disabled" });
+      return;
+    }
+
+    const session = await signInWithEmailCode({
+      email: String(req.body?.email ?? ""),
+      code: String(req.body?.code ?? ""),
+      allowSignup: intent === "signup"
+    });
+    sendSession(res, session, session.isNewAccount ? 201 : 200, { isNewAccount: session.isNewAccount });
+  } catch (error) {
+    if (error instanceof InvalidEmailCodeError) {
+      res.status(401).json({ error: "The code is invalid or has expired.", code: "invalid_code" });
+      return;
+    }
+
+    if (error instanceof AccountNotFoundError) {
+      res.status(404).json({ error: "No account exists for this email.", code: "account_not_found" });
+      return;
+    }
+
+    if (error instanceof Error && /email/i.test(error.message)) {
+      res.status(400).json({ error: "Email address is invalid.", code: "invalid_email" });
+      return;
+    }
+
+    next(error);
+  }
+});
+
+app.patch(
+  "/auth/scanneraz/profile",
+  markSensitiveResponse,
+  requirePublicAppAccess,
+  requireTenantSession,
+  async (req, res, next) => {
+    try {
+      const displayName = typeof req.body?.displayName === "string"
+        ? req.body.displayName.trim().slice(0, 80) || undefined
+        : undefined;
+      const sellerStage = req.body?.sellerStage === "active" || req.body?.sellerStage === "starting"
+        ? req.body.sellerStage
+        : undefined;
+      const profile = await updateAccountProfile(req.scannerazTenantSession!.userId, {
+        displayName,
+        sellerStage,
+        onboarded: req.body?.onboarded === true
+      });
+      res.setHeader("cache-control", "no-store");
+      res.json({ profile });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 app.post("/auth/scanneraz/login", requirePublicAppAccess, accountRateLimit, async (req, res, next) => {
   try {
     const session = await loginAccount({
@@ -457,6 +569,7 @@ app.get("/auth/scanneraz/me", requirePublicAppAccess, requireTenantSession, (req
   res.json({
     user: { id: session.userId, email: session.email },
     tenant: { id: session.tenantId, role: session.role },
+    profile: session.profile ?? {},
     expiresAt: session.expiresAt
   });
 });
@@ -879,15 +992,19 @@ function sendSession(
     tenantId: string;
     role: "owner" | "member";
     expiresAt: string;
+    profile?: AccountProfile;
   },
-  status = 200
+  status = 200,
+  extra: Record<string, unknown> = {}
 ) {
   setSessionCookie(res, session.accessToken);
   res.setHeader("cache-control", "no-store");
   res.status(status).json({
     user: { id: session.userId, email: session.email },
     tenant: { id: session.tenantId, role: session.role },
+    profile: session.profile ?? {},
     accessToken: session.accessToken,
-    expiresAt: session.expiresAt
+    expiresAt: session.expiresAt,
+    ...extra
   });
 }
