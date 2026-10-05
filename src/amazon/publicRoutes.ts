@@ -14,6 +14,8 @@ import {
   buildPreliminaryReleaseCalendar,
   getAmazonFeesEstimate,
   createAmazonReport,
+  searchSellerOrders,
+  AmazonOrdersRequestError,
   fetchAmazonReportIfReady,
   parseAmazonReturnsReport,
   listAmazonRecentOrders,
@@ -1455,6 +1457,75 @@ publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req,
 
     returnsSummaryCache.set(cacheKey, { value, expiresAt: Date.now() + 30 * 60 * 1000 });
     res.json(value);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Which data this store's authorization actually reaches: one minimal call
+ * per area. "denied" means Amazon refused it (role missing from the store's
+ * token, so the store must re-authorize); "error" is any other failure.
+ */
+publicAmazonRouter.get("/connections/:connectionId/permissions", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection?.sellerId) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    const probe = async (run: () => Promise<unknown>) => {
+      try {
+        await run();
+        return "granted" as const;
+      } catch (error) {
+        const denied = error instanceof AmazonOrdersRequestError
+          ? error.status === 401 || error.status === 403
+          : isAmazonAuthorizationFailure(error);
+        return denied ? "denied" as const : "error" as const;
+      }
+    };
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const [listings, orders, finances] = await Promise.all([
+      probe(() => searchSellerListings({
+        sellerId: connection.sellerId!,
+        refreshToken: connection.refreshToken,
+        accessToken,
+        marketplaceId,
+        pageSize: 1,
+      })),
+      probe(() => searchSellerOrders({
+        refreshToken: connection.refreshToken,
+        accessToken,
+        marketplaceId,
+        lastUpdatedAfter: dayAgo,
+        maxResultsPerPage: 1,
+      })),
+      probe(() => getAmazonFinancialEventGroups({
+        refreshToken: connection.refreshToken,
+        accessToken,
+        startedAfter: dayAgo,
+        startedBefore: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        maxResultsPerPage: 1,
+      })),
+    ]);
+
+    res.json({
+      connectionId,
+      checkedAt: new Date().toISOString(),
+      permissions: [
+        { key: "listings", label: "Productos y precios (Listings, Pricing)", status: listings },
+        { key: "orders", label: "Pedidos y devoluciones", status: orders },
+        { key: "finances", label: "Finanzas y pagos", status: finances },
+      ],
+    });
   } catch (error) {
     next(error);
   }
