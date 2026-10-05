@@ -13,8 +13,9 @@ import {
   buildAmazonReleaseCalendar,
   buildPreliminaryReleaseCalendar,
   getAmazonFeesEstimate,
-  listAmazonRefundEvents,
-  type AmazonRefundItem,
+  createAmazonReport,
+  fetchAmazonReportIfReady,
+  parseAmazonReturnsReport,
   listAmazonRecentOrders,
   preliminaryFeeRate,
   type AmazonRecentOrder,
@@ -1342,10 +1343,14 @@ publicAmazonRouter.post("/connections/:connectionId/listings/search", async (req
 });
 
 const returnsSummaryCache = new Map<string, { expiresAt: number; value: unknown }>();
+const pendingReturnsReports = new Map<string, { reportId: string; createdAt: number }>();
+const returnsWindowDays = 60;
 
 /**
- * Return rate for a store over the last N days: units Amazon refunded
- * (Finances refund events) against units sold in synced Amazon orders.
+ * Return rate for a store over the last 60 days from Amazon's FBM returns
+ * report (every return request, whatever its status) against units sold in
+ * synced Amazon orders. Reports are generated asynchronously: the first call
+ * may answer `pending` and the app asks again shortly.
  */
 publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req, res, next) => {
   try {
@@ -1358,9 +1363,7 @@ publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req,
       return;
     }
 
-    const requestedDays = Number(req.query.days ?? 90);
-    const days = Number.isInteger(requestedDays) && requestedDays >= 7 && requestedDays <= 180 ? requestedDays : 90;
-    const cacheKey = `${tenantId}:${connectionId}:${days}`;
+    const cacheKey = `${tenantId}:${connectionId}`;
     const cached = returnsSummaryCache.get(cacheKey);
 
     if (cached && cached.expiresAt > Date.now() && req.query.refresh !== "1") {
@@ -1369,54 +1372,79 @@ publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req,
     }
 
     assertAmazonSpApiConfig(connection.refreshToken);
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+    const since = new Date(Date.now() - returnsWindowDays * 24 * 60 * 60 * 1000);
     const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
-    const refunds: AmazonRefundItem[] = [];
-    let nextToken: string | undefined;
-    let pages = 0;
+    let report: string | undefined;
 
     try {
-      do {
-        const page = await listAmazonRefundEvents({
+      let pending = pendingReturnsReports.get(cacheKey);
+
+      // A report request older than 10 minutes is abandoned and re-requested.
+      if (!pending || Date.now() - pending.createdAt > 10 * 60 * 1000) {
+        const reportId = await createAmazonReport({
           refreshToken: connection.refreshToken,
           accessToken,
-          postedAfter: since.toISOString(),
-          nextToken,
+          reportType: "GET_FLAT_FILE_RETURNS_DATA_BY_RETURN_DATE",
+          marketplaceId,
+          dataStartTime: since.toISOString(),
         });
-        refunds.push(...page.refunds);
-        nextToken = page.nextToken;
-        pages += 1;
-      } while (nextToken && pages < 25);
+        pending = { reportId, createdAt: Date.now() };
+        pendingReturnsReports.set(cacheKey, pending);
+      }
+
+      for (let attempt = 0; attempt < 5 && report === undefined; attempt += 1) {
+        if (attempt > 0) {
+          await delay(4000);
+        }
+
+        report = await fetchAmazonReportIfReady({
+          refreshToken: connection.refreshToken,
+          accessToken,
+          reportId: pending.reportId,
+        });
+      }
     } catch (error) {
       if (isAmazonAuthorizationFailure(error)) {
-        res.json({ connectionId, days, authorizationRequired: true });
+        res.json({ connectionId, days: returnsWindowDays, authorizationRequired: true });
         return;
       }
 
       throw error;
     }
 
-    const unitsBySku = new Map<string, number>();
-
-    for (const refund of refunds) {
-      if (refund.sku) {
-        unitsBySku.set(refund.sku, (unitsBySku.get(refund.sku) ?? 0) + refund.quantity);
-      }
+    if (report === undefined) {
+      res.json({ connectionId, days: returnsWindowDays, authorizationRequired: false, pending: true });
+      return;
     }
+
+    pendingReturnsReports.delete(cacheKey);
+    const rows = parseAmazonReturnsReport(report);
+    const countBy = (key: (row: (typeof rows)[number]) => string | undefined) => {
+      const counts = new Map<string, number>();
+
+      for (const row of rows) {
+        const value = key(row);
+
+        if (value) {
+          counts.set(value, (counts.get(value) ?? 0) + row.quantity);
+        }
+      }
+
+      return [...counts.entries()].sort((left, right) => right[1] - left[1]);
+    };
 
     const value = {
       connectionId,
-      days,
+      days: returnsWindowDays,
       authorizationRequired: false,
-      refundedUnits: refunds.reduce((sum, refund) => sum + refund.quantity, 0),
-      refundedOrders: new Set(refunds.map((refund) => refund.orderId).filter(Boolean)).size,
-      refundedAmount: Math.round(refunds.reduce((sum, refund) => sum + (refund.amount ?? 0), 0) * 100) / 100,
+      pending: false,
+      returnedUnits: rows.reduce((sum, row) => sum + row.quantity, 0),
+      returnRequests: rows.length,
       soldUnits: await soldAmazonUnitsSince(tenantId, connectionId, since),
-      truncated: Boolean(nextToken),
-      topSkus: [...unitsBySku.entries()]
-        .sort((left, right) => right[1] - left[1])
-        .slice(0, 5)
-        .map(([sku, units]) => ({ sku, units })),
+      topSkus: countBy((row) => row.sku).slice(0, 5).map(([sku, units]) => ({ sku, units })),
+      topReasons: countBy((row) => row.reason).slice(0, 3).map(([reason, units]) => ({ reason, units })),
+      statuses: countBy((row) => row.status).map(([status, units]) => ({ status, units })),
     };
 
     returnsSummaryCache.set(cacheKey, { value, expiresAt: Date.now() + 30 * 60 * 1000 });

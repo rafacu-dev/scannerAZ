@@ -11,7 +11,7 @@ import {
   inferCatalogIdentifierType,
   normalizeAmazonDeferredTransactions,
   normalizeAmazonFeesEstimate,
-  normalizeAmazonRefundEvents,
+  parseAmazonReturnsReport,
   normalizeAmazonItemOffers,
   normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
@@ -562,27 +562,16 @@ test("normalizes an Amazon fee estimate", () => {
   assert.deepEqual(estimate.fees[0], { type: "ReferralFee", amount: 5.52 });
 });
 
-test("normalizes refund events with SKU and quantity", () => {
-  const page = normalizeAmazonRefundEvents({
-    payload: {
-      NextToken: "next",
-      FinancialEvents: {
-        RefundEventList: [{
-          AmazonOrderId: "111-1",
-          PostedDate: "2026-10-01T10:00:00Z",
-          ShipmentItemAdjustmentList: [{
-            SellerSKU: "SKU-1",
-            QuantityShipped: 2,
-            ItemChargeAdjustmentList: [
-              { ChargeType: "Principal", ChargeAmount: { CurrencyCode: "USD", CurrencyAmount: -40 } },
-              { ChargeType: "Tax", ChargeAmount: { CurrencyCode: "USD", CurrencyAmount: -2.4 } }
-            ]
-          }]
-        }]
-      }
-    }
-  });
+test("parses the FBM returns report", () => {
+  const rows = parseAmazonReturnsReport([
+    "Order ID\tOrder date\tReturn request date\tReturn request status\tASIN\tMerchant SKU\tItem Name\tReturn quantity\tReturn reason",
+    "111-1\t2026-09-01\t2026-09-10\tApproved\tB000000001\tSKU-1\tMixer\t2\tDefective",
+    "111-2\t2026-09-02\t2026-09-12\tPending\tB000000002\tSKU-2\tCooker\t1\tNo longer needed"
+  ].join("\n"));
 
-  assert.equal(page.nextToken, "next");
-  assert.deepEqual(page.refunds, [{ orderId: "111-1", postedDate: "2026-10-01T10:00:00Z", sku: "SKU-1", quantity: 2, amount: 42.4 }]);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], {
+    orderId: "111-1", requestDate: "2026-09-10", status: "Approved", asin: "B000000001",
+    sku: "SKU-1", title: "Mixer", quantity: 2, reason: "Defective"
+  });
 });

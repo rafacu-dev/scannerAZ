@@ -1,3 +1,4 @@
+import { gunzipSync } from "node:zlib";
 import { config } from "../config.js";
 
 type RegionConfig = {
@@ -713,71 +714,141 @@ export function normalizeAmazonFeesEstimate(
   };
 }
 
-export type AmazonRefundItem = {
+export type AmazonReturnRow = {
   orderId?: string;
-  postedDate?: string;
+  requestDate?: string;
+  status?: string;
+  asin?: string;
   sku?: string;
+  title?: string;
   quantity: number;
-  amount?: number;
+  reason?: string;
 };
 
-/**
- * Finances v0 listFinancialEvents, refund events only: each refunded order
- * item with its SKU and quantity. Covered by the Finance and Accounting role.
- */
-export async function listAmazonRefundEvents(input: {
+/** Reports API: request a report for a date range (async on Amazon's side). */
+export async function createAmazonReport(input: {
   refreshToken: string;
   accessToken?: string;
-  postedAfter: string;
-  nextToken?: string;
+  reportType: string;
+  marketplaceId?: string;
+  dataStartTime: string;
+  dataEndTime?: string;
 }) {
   const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
   const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
-  const url = new URL("/finances/v0/financialEvents", endpoint);
-
-  if (input.nextToken) {
-    url.searchParams.set("NextToken", input.nextToken);
-  } else {
-    url.searchParams.set("PostedAfter", input.postedAfter);
-    url.searchParams.set("MaxResultsPerPage", "100");
-  }
-
-  const response = await fetch(url, { headers: spApiReadHeaders(accessToken) });
-  const body = await response.text();
-  const parsedBody = parseJsonBody(body);
+  const response = await fetch(new URL("/reports/2021-06-30/reports", endpoint), {
+    method: "POST",
+    headers: { ...spApiReadHeaders(accessToken), "content-type": "application/json" },
+    body: JSON.stringify({
+      reportType: input.reportType,
+      marketplaceIds: [input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID],
+      dataStartTime: input.dataStartTime,
+      ...(input.dataEndTime ? { dataEndTime: input.dataEndTime } : {}),
+    }),
+  });
+  const parsedBody = parseJsonBody(await response.text());
 
   if (!response.ok) {
-    throw new Error(formatSpApiError("Amazon Finances", response.status, parsedBody, "Finance and Accounting"));
+    throw new Error(formatSpApiError("Amazon Reports", response.status, parsedBody, "Inventory and Order Tracking"));
   }
 
-  return normalizeAmazonRefundEvents(parsedBody);
+  const reportId = stringValue(recordValue(asRecord(parsedBody), ["reportId"]));
+
+  if (!reportId) {
+    throw new Error("Amazon did not return a report ID.");
+  }
+
+  return reportId;
 }
 
-export function normalizeAmazonRefundEvents(value: unknown) {
-  const payload = asRecord(recordValue(asRecord(value), ["payload"]));
-  const events = asRecord(recordValue(payload, ["FinancialEvents"]));
-  const refunds: AmazonRefundItem[] = recordArray(recordValue(events, ["RefundEventList"])).flatMap((event) => {
-    const orderId = stringValue(recordValue(event, ["AmazonOrderId"]));
-    const postedDate = stringValue(recordValue(event, ["PostedDate"]));
+/**
+ * Checks a report; when Amazon finished it, downloads and returns its text.
+ * Returns undefined while it is still being generated.
+ */
+export async function fetchAmazonReportIfReady(input: {
+  refreshToken: string;
+  accessToken?: string;
+  reportId: string;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const reportResponse = await fetch(
+    new URL(`/reports/2021-06-30/reports/${encodeURIComponent(input.reportId)}`, endpoint),
+    { headers: spApiReadHeaders(accessToken) }
+  );
+  const report = asRecord(parseJsonBody(await reportResponse.text()));
 
-    return recordArray(recordValue(event, ["ShipmentItemAdjustmentList"])).map((item) => {
-      const charges = recordArray(recordValue(item, ["ItemChargeAdjustmentList"]));
-      const amount = charges.reduce((sum, charge) => {
-        const value = numberValue(recordValue(asRecord(recordValue(charge, ["ChargeAmount"])), ["CurrencyAmount"]));
-        return sum + (value ?? 0);
-      }, 0);
+  if (!reportResponse.ok) {
+    throw new Error(formatSpApiError("Amazon Reports", reportResponse.status, report, "Inventory and Order Tracking"));
+  }
 
-      return {
-        orderId,
-        postedDate,
-        sku: stringValue(recordValue(item, ["SellerSKU"])),
-        quantity: Math.max(1, Math.abs(numberValue(recordValue(item, ["QuantityShipped"])) ?? 1)),
-        amount: Math.round(Math.abs(amount) * 100) / 100,
-      };
-    });
+  const status = stringValue(recordValue(report, ["processingStatus"]));
+
+  if (status === "CANCELLED" || status === "FATAL") {
+    // CANCELLED also means "no data for this range".
+    return status === "CANCELLED" ? "" : Promise.reject(new Error(`Amazon report ${status}`));
+  }
+
+  const documentId = stringValue(recordValue(report, ["reportDocumentId"]));
+
+  if (status !== "DONE" || !documentId) {
+    return undefined;
+  }
+
+  const documentResponse = await fetch(
+    new URL(`/reports/2021-06-30/documents/${encodeURIComponent(documentId)}`, endpoint),
+    { headers: spApiReadHeaders(accessToken) }
+  );
+  const document = asRecord(parseJsonBody(await documentResponse.text()));
+  const url = stringValue(recordValue(document, ["url"]));
+
+  if (!documentResponse.ok || !url) {
+    throw new Error("Amazon did not return the report document.");
+  }
+
+  const file = Buffer.from(await (await fetch(url)).arrayBuffer());
+  return stringValue(recordValue(document, ["compressionAlgorithm"])) === "GZIP"
+    ? gunzipSync(file).toString("utf8")
+    : file.toString("utf8");
+}
+
+/** Parses the tab-separated FBM returns report (headers vary slightly). */
+export function parseAmazonReturnsReport(text: string): AmazonReturnRow[] {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+
+  if (lines.length < 2) {
+    return [];
+  }
+
+  const headers = lines[0].split("\t").map((header) => header.trim().toLowerCase());
+  const column = (...names: string[]) => headers.findIndex((header) => names.includes(header));
+  const index = {
+    orderId: column("order id", "order-id"),
+    requestDate: column("return request date", "return-request-date"),
+    status: column("return request status", "return-request-status"),
+    asin: column("asin"),
+    sku: column("merchant sku", "merchant-sku", "sku"),
+    title: column("item name", "item-name", "product-name"),
+    quantity: column("return quantity", "return-quantity", "quantity"),
+    reason: column("return reason", "return-reason"),
+  };
+
+  return lines.slice(1).map((line) => {
+    const cells = line.split("\t");
+    const cell = (position: number) => (position >= 0 ? cells[position]?.trim() || undefined : undefined);
+    const quantity = Number(cell(index.quantity) ?? 1);
+
+    return {
+      orderId: cell(index.orderId),
+      requestDate: cell(index.requestDate),
+      status: cell(index.status),
+      asin: cell(index.asin),
+      sku: cell(index.sku),
+      title: cell(index.title),
+      quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+      reason: cell(index.reason),
+    };
   });
-
-  return { refunds, nextToken: stringValue(recordValue(payload, ["NextToken"])) };
 }
 
 /** Order totals and delivery windows used for a preliminary payout estimate. */
