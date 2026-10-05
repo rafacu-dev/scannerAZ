@@ -11,6 +11,7 @@ import {
   inferCatalogIdentifierType,
   normalizeAmazonDeferredTransactions,
   normalizeAmazonFeesEstimate,
+  normalizeAmazonRefundEvents,
   normalizeAmazonItemOffers,
   normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
@@ -559,4 +560,29 @@ test("normalizes an Amazon fee estimate", () => {
   assert.equal(estimate.totalFees, 5.52);
   assert.equal(estimate.error, undefined);
   assert.deepEqual(estimate.fees[0], { type: "ReferralFee", amount: 5.52 });
+});
+
+test("normalizes refund events with SKU and quantity", () => {
+  const page = normalizeAmazonRefundEvents({
+    payload: {
+      NextToken: "next",
+      FinancialEvents: {
+        RefundEventList: [{
+          AmazonOrderId: "111-1",
+          PostedDate: "2026-10-01T10:00:00Z",
+          ShipmentItemAdjustmentList: [{
+            SellerSKU: "SKU-1",
+            QuantityShipped: 2,
+            ItemChargeAdjustmentList: [
+              { ChargeType: "Principal", ChargeAmount: { CurrencyCode: "USD", CurrencyAmount: -40 } },
+              { ChargeType: "Tax", ChargeAmount: { CurrencyCode: "USD", CurrencyAmount: -2.4 } }
+            ]
+          }]
+        }]
+      }
+    }
+  });
+
+  assert.equal(page.nextToken, "next");
+  assert.deepEqual(page.refunds, [{ orderId: "111-1", postedDate: "2026-10-01T10:00:00Z", sku: "SKU-1", quantity: 2, amount: 42.4 }]);
 });

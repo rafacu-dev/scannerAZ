@@ -713,6 +713,73 @@ export function normalizeAmazonFeesEstimate(
   };
 }
 
+export type AmazonRefundItem = {
+  orderId?: string;
+  postedDate?: string;
+  sku?: string;
+  quantity: number;
+  amount?: number;
+};
+
+/**
+ * Finances v0 listFinancialEvents, refund events only: each refunded order
+ * item with its SKU and quantity. Covered by the Finance and Accounting role.
+ */
+export async function listAmazonRefundEvents(input: {
+  refreshToken: string;
+  accessToken?: string;
+  postedAfter: string;
+  nextToken?: string;
+}) {
+  const endpoint = getSpApiEndpoint(config.AMAZON_REGION, config.AMAZON_SP_API_ENVIRONMENT);
+  const accessToken = input.accessToken ?? (await getLwaAccessToken(input.refreshToken)).access_token;
+  const url = new URL("/finances/v0/financialEvents", endpoint);
+
+  if (input.nextToken) {
+    url.searchParams.set("NextToken", input.nextToken);
+  } else {
+    url.searchParams.set("PostedAfter", input.postedAfter);
+    url.searchParams.set("MaxResultsPerPage", "100");
+  }
+
+  const response = await fetch(url, { headers: spApiReadHeaders(accessToken) });
+  const body = await response.text();
+  const parsedBody = parseJsonBody(body);
+
+  if (!response.ok) {
+    throw new Error(formatSpApiError("Amazon Finances", response.status, parsedBody, "Finance and Accounting"));
+  }
+
+  return normalizeAmazonRefundEvents(parsedBody);
+}
+
+export function normalizeAmazonRefundEvents(value: unknown) {
+  const payload = asRecord(recordValue(asRecord(value), ["payload"]));
+  const events = asRecord(recordValue(payload, ["FinancialEvents"]));
+  const refunds: AmazonRefundItem[] = recordArray(recordValue(events, ["RefundEventList"])).flatMap((event) => {
+    const orderId = stringValue(recordValue(event, ["AmazonOrderId"]));
+    const postedDate = stringValue(recordValue(event, ["PostedDate"]));
+
+    return recordArray(recordValue(event, ["ShipmentItemAdjustmentList"])).map((item) => {
+      const charges = recordArray(recordValue(item, ["ItemChargeAdjustmentList"]));
+      const amount = charges.reduce((sum, charge) => {
+        const value = numberValue(recordValue(asRecord(recordValue(charge, ["ChargeAmount"])), ["CurrencyAmount"]));
+        return sum + (value ?? 0);
+      }, 0);
+
+      return {
+        orderId,
+        postedDate,
+        sku: stringValue(recordValue(item, ["SellerSKU"])),
+        quantity: Math.max(1, Math.abs(numberValue(recordValue(item, ["QuantityShipped"])) ?? 1)),
+        amount: Math.round(Math.abs(amount) * 100) / 100,
+      };
+    });
+  });
+
+  return { refunds, nextToken: stringValue(recordValue(payload, ["NextToken"])) };
+}
+
 /** Order totals and delivery windows used for a preliminary payout estimate. */
 export type AmazonRecentOrder = {
   orderId: string;

@@ -2529,6 +2529,22 @@ export async function saveInventoryProductLink(tenantId: string, input: {
   }
 }
 
+/** Units of Amazon orders synced for a store since a date (for return rates). */
+export async function soldAmazonUnitsSince(tenantId: string, connectionId: string, since: Date) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{ units: string | number | null }>(
+    `
+      SELECT COALESCE(SUM(desired_quantity), 0) AS units
+      FROM scanneraz_inventory_amazon_order_lines
+      WHERE tenant_id = $1 AND connection_id = $2 AND COALESCE(order_created_at, created_at) >= $3
+    `,
+    [tenantId, connectionId, since]
+  );
+
+  return numberValue(result.rows[0]?.units);
+}
+
 /** Saved product matches for receipt line names (exact name, normalized). */
 export async function resolveInventoryNameMappings(tenantId: string, names: string[]) {
   const inventoryPool = requirePool();

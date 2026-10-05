@@ -13,6 +13,8 @@ import {
   buildAmazonReleaseCalendar,
   buildPreliminaryReleaseCalendar,
   getAmazonFeesEstimate,
+  listAmazonRefundEvents,
+  type AmazonRefundItem,
   listAmazonRecentOrders,
   preliminaryFeeRate,
   type AmazonRecentOrder,
@@ -45,6 +47,7 @@ import {
 import { listRestockRulesForConnection, saveRestockRule } from "./restock.js";
 import { attachCompetitorSellerNames } from "./sellerNames.js";
 import { listProductCosts, saveProductCost } from "./productCosts.js";
+import { soldAmazonUnitsSince } from "../inventory/store.js";
 
 export const publicAmazonRouter = express.Router();
 
@@ -1333,6 +1336,91 @@ publicAmazonRouter.post("/connections/:connectionId/listings/search", async (req
       connectionId,
       listings: withImages.map((listing, index) => ({ ...listing, score: scored[index]?.score })),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const returnsSummaryCache = new Map<string, { expiresAt: number; value: unknown }>();
+
+/**
+ * Return rate for a store over the last N days: units Amazon refunded
+ * (Finances refund events) against units sold in synced Amazon orders.
+ */
+publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const connectionId = String(req.params.connectionId ?? "").trim();
+    const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+
+    if (!connection) {
+      res.status(404).json({ error: "Amazon connection not found" });
+      return;
+    }
+
+    const requestedDays = Number(req.query.days ?? 90);
+    const days = Number.isInteger(requestedDays) && requestedDays >= 7 && requestedDays <= 180 ? requestedDays : 90;
+    const cacheKey = `${tenantId}:${connectionId}:${days}`;
+    const cached = returnsSummaryCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > Date.now() && req.query.refresh !== "1") {
+      res.json(cached.value);
+      return;
+    }
+
+    assertAmazonSpApiConfig(connection.refreshToken);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
+    const refunds: AmazonRefundItem[] = [];
+    let nextToken: string | undefined;
+    let pages = 0;
+
+    try {
+      do {
+        const page = await listAmazonRefundEvents({
+          refreshToken: connection.refreshToken,
+          accessToken,
+          postedAfter: since.toISOString(),
+          nextToken,
+        });
+        refunds.push(...page.refunds);
+        nextToken = page.nextToken;
+        pages += 1;
+      } while (nextToken && pages < 25);
+    } catch (error) {
+      if (isAmazonAuthorizationFailure(error)) {
+        res.json({ connectionId, days, authorizationRequired: true });
+        return;
+      }
+
+      throw error;
+    }
+
+    const unitsBySku = new Map<string, number>();
+
+    for (const refund of refunds) {
+      if (refund.sku) {
+        unitsBySku.set(refund.sku, (unitsBySku.get(refund.sku) ?? 0) + refund.quantity);
+      }
+    }
+
+    const value = {
+      connectionId,
+      days,
+      authorizationRequired: false,
+      refundedUnits: refunds.reduce((sum, refund) => sum + refund.quantity, 0),
+      refundedOrders: new Set(refunds.map((refund) => refund.orderId).filter(Boolean)).size,
+      refundedAmount: Math.round(refunds.reduce((sum, refund) => sum + (refund.amount ?? 0), 0) * 100) / 100,
+      soldUnits: await soldAmazonUnitsSince(tenantId, connectionId, since),
+      truncated: Boolean(nextToken),
+      topSkus: [...unitsBySku.entries()]
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 5)
+        .map(([sku, units]) => ({ sku, units })),
+    };
+
+    returnsSummaryCache.set(cacheKey, { value, expiresAt: Date.now() + 30 * 60 * 1000 });
+    res.json(value);
   } catch (error) {
     next(error);
   }
