@@ -689,6 +689,40 @@ export async function deleteTenantSession(accessToken: string) {
   ]);
 }
 
+export async function deleteAccountForUser(userId: string) {
+  const accountPool = requirePool();
+  await initializeAccountStore();
+  const client = await accountPool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const membership = await client.query<{ tenant_id: string; role: "owner" | "member" }>(
+      `
+        SELECT tenant_id, role
+        FROM scanneraz_tenant_memberships
+        WHERE user_id = $1
+        ORDER BY role = 'owner' DESC
+        LIMIT 1
+      `,
+      [userId]
+    );
+    const row = membership.rows[0];
+
+    if (!row || row.role !== "owner") {
+      throw new Error("Only a workspace owner can delete the account");
+    }
+
+    await client.query("DELETE FROM scanneraz_tenants WHERE id = $1", [row.tenant_id]);
+    await client.query("DELETE FROM scanneraz_users WHERE id = $1", [userId]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 /**
  * A mobile OAuth handoff is an opaque, single-use ticket. It conveys only the
  * tenant binding to the external browser, never the ScannerAz session token.

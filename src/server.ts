@@ -47,6 +47,7 @@ import {
   AccountNotFoundError,
   changeAccountPassword,
   createEmailSignInCode,
+  deleteAccountForUser,
   discardEmailSignInCodes,
   InvalidEmailCodeError,
   signInWithEmailCode,
@@ -601,6 +602,16 @@ app.get("/auth/scanneraz/me", requirePublicAppAccess, requireTenantSession, (req
 app.post("/auth/scanneraz/logout", requirePublicAppAccess, requireTenantSession, async (req, res, next) => {
   try {
     await endRequestSession(req, res);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/auth/scanneraz/account", requirePublicAppAccess, requireTenantSession, async (req, res, next) => {
+  try {
+    await deleteAccountForUser(req.scannerazTenantSession!.userId);
+    clearSessionCookie(res);
     res.status(204).end();
   } catch (error) {
     next(error);
