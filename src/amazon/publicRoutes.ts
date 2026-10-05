@@ -1406,6 +1406,12 @@ publicAmazonRouter.get("/connections/:connectionId/returns/summary", async (req,
       }
     } catch (error) {
       if (isAmazonAuthorizationFailure(error)) {
+        // Amazon's message tells whether the role is missing from the token.
+        console.warn(JSON.stringify({
+          event: "amazon.returns_report.denied",
+          connectionId,
+          message: error instanceof Error ? error.message.slice(0, 400) : String(error),
+        }));
         res.json({ connectionId, days: returnsWindowDays, authorizationRequired: true });
         return;
       }
