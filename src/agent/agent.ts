@@ -328,7 +328,17 @@ export async function askAgent(input: {
       continue;
     }
 
-    if (!calls.length || round >= maxToolRounds) {
+    if (!calls.length) {
+      break;
+    }
+
+    // Out of tool rounds: ask for the final answer with what it already has.
+    if (round >= maxToolRounds) {
+      conversation.push(
+        { role: "assistant", content: rawReply },
+        { role: "user", content: "(internal) No more tools. Write the final answer for the user now with the data you already have." }
+      );
+      rawReply = await requestChatCompletion(conversation);
       break;
     }
 
@@ -347,6 +357,12 @@ export async function askAgent(input: {
   }
 
   rawReply = rawReply.replace(toolCallPattern, "").trim();
+
+  if (!rawReply) {
+    rawReply = input.locale === "en"
+      ? "I couldn't put together an answer this time. Could you ask again, maybe more specifically?"
+      : "No pude armar la respuesta esta vez. ¿Puedes preguntarlo de nuevo, quizás de forma más concreta?";
+  }
   const { text: reply, notes } = extractMemoryNotes(rawReply);
   await applyMemoryNotes(input.tenantId, notes).catch((error: unknown) => {
     console.warn(JSON.stringify({ event: "agent.memory_failed", error: error instanceof Error ? error.message : "unknown" }));
@@ -391,12 +407,14 @@ function systemPrompt(locale: AgentLocale, context: string, memories: AgentMemor
     "{\"name\": \"tool_name\", \"args\": {...}} or an array of up to 4 of them, and nothing else. You will get the results",
     "in the next message, then you can call more tools or write the final answer. Never show tool blocks in a final answer.",
     "ALWAYS use tools before saying you don't have data. Never ask the user for numbers that a tool can provide.",
-    "For profit questions combine: list_receipts, inventory_overview (avg costs, units sold),",
-    "product_costs (purchase + FBM shipping cost per product), recent_orders (revenue), fee_estimate, release_calendar/payouts.",
+    "For profit/earnings questions ALWAYS call profit_summary (it already matches revenue and costs for the same period and",
+    "subtracts estimated fees); add list_receipts only when the user asks about total investment.",
+    "To find a product, call inventory_overview with a short keyword in English and in singular (e.g. 'cooker', 'blender'),",
+    "and retry with another keyword if nothing matches; spoken product names are often misspelled.",
     "Costs: list_receipts gives the exact total invested across ALL receipts (sold and in-stock goods).",
     "For profit on what was sold use inventory_overview.costOfGoodsSold (units sold x average cost) and mention how many",
     "sold units have no known cost. Profit = revenue - Amazon fees - cost of goods sold - shipping; it is an estimate.",
-    "Revenue from recent_orders covers only its period (max 30 days): compare it with costs of the same period, not all-time.",
+    "Never subtract all-time costs from 30-day revenue.",
     "If a tool returns an authorization error, explain which Amazon permission the store must re-authorize in More.",
     "Example: user asks \"¿cuánto he ganado?\" -> you reply only:",
     "```tool",

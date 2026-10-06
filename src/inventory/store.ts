@@ -1293,6 +1293,74 @@ export async function listInventoryInvoices(tenantId: string, limit = 200): Prom
   }));
 }
 
+export type InventorySalesPeriodRow = {
+  productId: string;
+  title: string;
+  asin?: string;
+  unitsSold: number;
+  costCents: number;
+  unitsWithoutCost: number;
+};
+
+/**
+ * Units sold and their cost (COGS) since a date, per product. Each sale uses
+ * the cost of the lot it consumed (FIFO); sales beyond stock fall back to the
+ * product's average purchase cost.
+ */
+export async function summarizeInventorySalesSince(tenantId: string, since: Date): Promise<InventorySalesPeriodRow[]> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{
+    product_id: string;
+    title: string;
+    asin: string | null;
+    units: string | number;
+    lot_cost_cents: string | number | null;
+    units_without_lot: string | number | null;
+    average_cost_cents: string | number | null;
+  }>(
+    `
+      SELECT
+        movements.product_id,
+        products.title,
+        products.asin,
+        SUM(-movements.quantity_delta) AS units,
+        SUM(CASE WHEN lots.id IS NOT NULL THEN -movements.quantity_delta * lots.unit_cost_cents END) AS lot_cost_cents,
+        SUM(CASE WHEN lots.id IS NULL THEN -movements.quantity_delta ELSE 0 END) AS units_without_lot,
+        MAX(averages.average_cost_cents) AS average_cost_cents
+      FROM scanneraz_inventory_movements AS movements
+      JOIN scanneraz_inventory_products AS products ON products.id = movements.product_id
+      LEFT JOIN scanneraz_inventory_lots AS lots ON lots.id = movements.lot_id
+      LEFT JOIN (
+        SELECT product_id, SUM(received_quantity * unit_cost_cents)::float / NULLIF(SUM(received_quantity), 0) AS average_cost_cents
+        FROM scanneraz_inventory_lots
+        WHERE tenant_id = $1
+        GROUP BY product_id
+      ) AS averages ON averages.product_id = movements.product_id
+      WHERE movements.tenant_id = $1
+        AND movements.movement_type = 'sale'
+        AND movements.quantity_delta < 0
+        AND movements.occurred_at >= $2
+      GROUP BY movements.product_id, products.title, products.asin
+      ORDER BY units DESC
+    `,
+    [tenantId, since]
+  );
+
+  return result.rows.map((row) => {
+    const unitsWithoutLot = numberValue(row.units_without_lot);
+    const average = row.average_cost_cents === null ? undefined : numberValue(row.average_cost_cents);
+    return {
+      productId: row.product_id,
+      title: row.title,
+      asin: row.asin ?? undefined,
+      unitsSold: numberValue(row.units),
+      costCents: Math.round(numberValue(row.lot_cost_cents) + (average === undefined ? 0 : unitsWithoutLot * average)),
+      unitsWithoutCost: average === undefined ? unitsWithoutLot : 0
+    };
+  });
+}
+
 export async function recordAmazonCustomerReturn(
   tenantId: string,
   input: RecordAmazonCustomerReturnInput

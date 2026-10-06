@@ -1,7 +1,7 @@
 import { config } from "../config.js";
 import { getAmazonFinancialEventGroups, listAmazonRecentOrders } from "../amazon/spapi.js";
 import { getAmazonConnectionForTenant, listAmazonConnectionsForTenant } from "../storage/connections.js";
-import { getInventoryOverview, listInventoryInvoices } from "../inventory/store.js";
+import { getInventoryOverview, listInventoryInvoices, summarizeInventorySalesSince } from "../inventory/store.js";
 
 /**
  * Read-only tools the agent can call. Most reuse the app's own public API
@@ -125,6 +125,77 @@ export const agentTools: Record<string, AgentTool> = {
         productCount: overview.products.length,
         products,
         note: overview.products.length > products.length ? `Showing ${products.length} of ${overview.products.length} products (most sold first); use search to filter.` : undefined
+      };
+    }
+  },
+  // Profit for a period, computed here so revenue and costs cover the same days.
+  profit_summary: {
+    description: "Estimated profit for the last N days (max 30) across all stores: Amazon revenue (order totals), units sold "
+      + "and their cost of goods (FIFO lot costs), estimated Amazon fees (~15% of revenue), gross and net profit, top products. "
+      + "Use this for any profit/earnings question.",
+    args: "{\"days\"?: number}",
+    run: async (context, args) => {
+      const days = Math.min(Math.max(Math.round(numberArg(args, "days") ?? 30), 1), 30);
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const connections = await listAmazonConnectionsForTenant(context.tenantId);
+      let revenue = 0;
+      let orderCount = 0;
+      const revenueErrors: string[] = [];
+
+      for (const connection of connections) {
+        const stored = await getAmazonConnectionForTenant(connection.id, context.tenantId);
+        if (!stored) {
+          continue;
+        }
+        try {
+          let nextToken: string | undefined;
+          let pages = 0;
+          do {
+            const page = await listAmazonRecentOrders({
+              refreshToken: stored.refreshToken,
+              marketplaceId: stored.marketplaceId || config.AMAZON_MARKETPLACE_ID,
+              createdAfter: since.toISOString(),
+              nextToken
+            });
+            orderCount += page.orders.length;
+            revenue += page.orders.reduce((sum, order) => sum + (order.amount ?? 0), 0);
+            nextToken = page.nextToken;
+            pages += 1;
+          } while (nextToken && pages < 5);
+        } catch (error) {
+          revenueErrors.push(error instanceof Error ? error.message.slice(0, 160) : "orders unavailable");
+        }
+      }
+
+      const sales = await summarizeInventorySalesSince(context.tenantId, since);
+      const unitsSold = sales.reduce((sum, row) => sum + row.unitsSold, 0);
+      const costOfGoods = sales.reduce((sum, row) => sum + row.costCents, 0) / 100;
+      const unitsWithoutCost = sales.reduce((sum, row) => sum + row.unitsWithoutCost, 0);
+      const round = (value: number) => Math.round(value * 100) / 100;
+      const estimatedFees = round(revenue * 0.15);
+
+      return {
+        periodDays: days,
+        stores: connections.length,
+        orders: orderCount,
+        revenue: round(revenue),
+        unitsSold,
+        costOfGoodsSold: round(costOfGoods),
+        unitsSoldWithoutKnownCost: unitsWithoutCost,
+        estimatedAmazonFees: estimatedFees,
+        grossProfit: round(revenue - costOfGoods),
+        estimatedNetProfit: round(revenue - costOfGoods - estimatedFees),
+        notes: [
+          "Fees are estimated at 15% of revenue; real fees vary by category and FBA. Use fee_estimate per ASIN or payouts for exact amounts.",
+          "Units sold come from Amazon sales synced into inventory; they can lag behind orders until the next sync."
+        ],
+        revenueErrors: revenueErrors.length ? revenueErrors : undefined,
+        topProducts: sales.slice(0, 10).map((row) => ({
+          title: row.title.slice(0, 60),
+          asin: row.asin,
+          unitsSold: row.unitsSold,
+          cost: row.costCents / 100
+        }))
       };
     }
   },
