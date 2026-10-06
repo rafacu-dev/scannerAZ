@@ -11,7 +11,6 @@ import {
   completeAmazonSalesSync,
   failAmazonSalesSync,
   importAmazonSalesLines,
-  listPendingAmazonSaleLines
 } from "./store.js";
 
 /**
@@ -69,17 +68,6 @@ export async function syncAmazonSalesForConnection(input: {
       nextPageToken = page.nextPageToken;
       paginationToken = nextPageToken;
     } while (paginationToken && pages < 5);
-
-    // Sales saved earlier as unshipped are applied now too (sold = out of stock).
-    const pending = await listPendingAmazonSaleLines(input.tenantId, input.connectionId);
-    if (pending.length) {
-      const imported = await importAmazonSalesLines(input.tenantId, input.connectionId, pending);
-      totals.processedLines += imported.processedLines;
-      totals.appliedLines += imported.appliedLines;
-      totals.appliedUnits += imported.appliedUnits;
-      totals.unmatchedLines += imported.unmatchedLines;
-      totals.insufficientLines += imported.insufficientLines;
-    }
 
     const sync = await completeAmazonSalesSync(input.tenantId, work, nextPageToken);
     return { pages, ...totals, sync };

@@ -883,7 +883,8 @@ export async function listAmazonRecentOrders(input: {
     url.searchParams.set("NextToken", input.nextToken);
   } else {
     url.searchParams.set("CreatedAfter", input.createdAfter);
-    url.searchParams.set("OrderStatuses", "Unshipped,PartiallyShipped,Shipped");
+    // Pending/unshipped orders can still be canceled, so they are not sales.
+    url.searchParams.set("OrderStatuses", "PartiallyShipped,Shipped");
     url.searchParams.set("MaxResultsPerPage", "100");
   }
 
