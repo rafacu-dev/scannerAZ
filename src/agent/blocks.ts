@@ -69,7 +69,9 @@ export const agentBlockSchema = z.discriminatedUnion("type", [
 
 export type AgentBlock = z.infer<typeof agentBlockSchema>;
 
-const fencePattern = /```ui\s*\n([\s\S]*?)```/g;
+// ```ui (preferred), ```json, or a bare JSON block on its own lines that
+// starts with {"type" / [{"type" — models don't always use the right fence.
+const fencePattern = /```(?:ui|json)?\s*\n([\s\S]*?)```|^[ \t]*(\[?\s*\{\s*"type"[\s\S]*?\}\s*\]?)[ \t]*$/gm;
 
 /** Splits a model reply into ordered blocks; invalid UI JSON is dropped. */
 export function parseAgentReply(reply: string) {
@@ -88,7 +90,7 @@ export function parseAgentReply(reply: string) {
     cursor = (match.index ?? 0) + match[0].length;
 
     try {
-      const parsed: unknown = JSON.parse(match[1]);
+      const parsed: unknown = JSON.parse(match[1] ?? match[2] ?? "");
       for (const candidate of Array.isArray(parsed) ? parsed : [parsed]) {
         const block = agentBlockSchema.safeParse(candidate);
         if (block.success) {
@@ -96,7 +98,8 @@ export function parseAgentReply(reply: string) {
         }
       }
     } catch {
-      // Malformed UI JSON is skipped; the surrounding text still reads well.
+      // Not UI JSON (e.g. a plain code snippet): keep its content as text.
+      pushText(match[1] ?? match[2] ?? "");
     }
   }
 

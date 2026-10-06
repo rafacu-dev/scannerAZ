@@ -258,6 +258,12 @@ const maxToolRounds = 5;
 const maxToolsPerRound = 4;
 const toolCallPattern = /```tool\s*\n([\s\S]*?)```/g;
 
+const missingDataPattern = /no tengo acceso|no tengo (los )?datos|no dispongo|proporci[oó]n(a|ame|es)|necesitar[ií]a que me|don't have access|do not have access|don't have (the )?data|please provide|if you (can )?provide|you would need to provide/i;
+
+function claimsMissingData(reply: string) {
+  return missingDataPattern.test(reply);
+}
+
 function extractToolCalls(reply: string) {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
 
@@ -309,6 +315,20 @@ export async function askAgent(input: {
   for (let round = 0; ; round += 1) {
     rawReply = await requestChatCompletion(conversation);
     const calls = extractToolCalls(rawReply);
+
+    // Small models sometimes answer "I don't have that data" or ask the user
+    // for numbers instead of calling a tool: push back once.
+    if (!calls.length && round === 0 && claimsMissingData(rawReply)) {
+      conversation.push(
+        { role: "assistant", content: rawReply },
+        {
+          role: "user",
+          content: "(internal) Do not ask the user for data and do not say you lack access: call the tools now " +
+            "(e.g. list_receipts, inventory_overview, product_costs, recent_orders) and then answer with real numbers."
+        }
+      );
+      continue;
+    }
 
     if (!calls.length || round >= maxToolRounds) {
       break;
@@ -369,6 +389,11 @@ function systemPrompt(locale: AgentLocale, context: string, memories: AgentMemor
     "For profit questions combine: list_receipts (investment), inventory_overview (avg costs, units sold),",
     "product_costs (purchase + FBM shipping cost per product), recent_orders (revenue), fee_estimate, release_calendar/payouts.",
     "If a tool returns an authorization error, explain which Amazon permission the store must re-authorize in More.",
+    "Example: user asks \"¿cuánto he ganado?\" -> you reply only:",
+    "```tool",
+    "[{\"name\":\"list_receipts\",\"args\":{}},{\"name\":\"recent_orders\",\"args\":{\"days\":30}},{\"name\":\"product_costs\",\"args\":{}}]",
+    "```",
+    "then, with the results, answer with metrics + a chart block. Put UI blocks inside ```ui fences, never as bare JSON.",
     "Available tools:",
     describeAgentTools(),
     "",
