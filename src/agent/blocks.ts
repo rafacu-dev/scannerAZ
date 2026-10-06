@@ -98,8 +98,11 @@ export function parseAgentReply(reply: string) {
         }
       }
     } catch {
-      // Not UI JSON (e.g. a plain code snippet): keep its content as text.
-      pushText(match[1] ?? match[2] ?? "");
+      // Broken ```ui JSON is dropped; any other fence (a plain code snippet)
+      // keeps its content as text.
+      if (!match[0].startsWith("```ui")) {
+        pushText(match[1] ?? match[2] ?? "");
+      }
     }
   }
 
