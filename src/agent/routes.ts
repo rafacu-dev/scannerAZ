@@ -5,6 +5,8 @@ import {
   AgentUnavailableError,
   askAgent,
   clearAgentMessages,
+  deleteAgentMemory,
+  listAgentMemories,
   listAgentMessages,
   transcribeVoiceMessage,
   type AgentLocale
@@ -65,6 +67,25 @@ agentRouter.get("/messages", async (req, res, next) => {
 agentRouter.delete("/messages", async (req, res, next) => {
   try {
     await clearAgentMessages(requireTenantId(req));
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// What the agent remembers about this account, so the user can review it.
+agentRouter.get("/memories", async (req, res, next) => {
+  try {
+    res.setHeader("cache-control", "no-store");
+    res.json({ memories: await listAgentMemories(requireTenantId(req)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+agentRouter.delete("/memories/:memoryId", async (req, res, next) => {
+  try {
+    await deleteAgentMemory(requireTenantId(req), String(req.params.memoryId));
     res.status(204).end();
   } catch (error) {
     next(error);
