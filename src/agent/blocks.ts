@@ -17,7 +17,13 @@ const metricsBlock = z.object({
 });
 const chartBlock = z.object({
   type: z.literal("chart"),
-  chart: z.enum(["bar"]).default("bar"),
+  // Any chart name the model invents maps to one the apps can draw.
+  chart: z.string().optional().transform((value): "bar" | "column" | "pie" => {
+    const name = (value ?? "bar").toLowerCase();
+    if (/pie|donut|doughnut|pastel|torta/.test(name)) return "pie";
+    if (/column|line|area|trend|vertical/.test(name)) return "column";
+    return "bar";
+  }),
   title: short.optional(),
   unit: z.string().trim().max(8).optional(),
   data: z.array(z.object({ label: short, value: z.number().finite() })).min(1).max(12)
@@ -135,7 +141,7 @@ Write normal text, and where a block helps, insert a fenced code block with the 
 Use blocks only when they add clarity (numbers, comparisons, lists of steps, options). Keep text short around them.
 Available block types (exact keys; strings are plain text, no markdown inside JSON):
 - {"type":"metrics","items":[{"label":"Inventory value","value":"$1,240","hint":"58 products","tone":"info|success|warning|danger"}]}  (max 6 items)
-- {"type":"chart","chart":"bar","title":"Units to buy","unit":"u","data":[{"label":"Item A","value":12}]}  (max 12 bars, numbers only)
+- {"type":"chart","chart":"bar|column|pie","title":"Units to buy","unit":"$|%|u","data":[{"label":"Item A","value":12}]}  (max 12 points, numbers only; "bar" compares items, "column" shows a trend over time, "pie" shows parts of a whole; use unit "$" for money)
 - {"type":"table","title":"...","columns":["SKU","Price","Min"],"rows":[["ABC","$19.99","$15.00"]]}  (max 6 columns, 20 rows)
 - {"type":"choices","prompt":"What do you want to check?","options":[{"label":"Repricing","value":"Show my repricing status"}]}  (the value is sent as the user's next message; max 6)
 - {"type":"steps","title":"How to request approval","items":["Open Add a Product","Search the ASIN"]}
