@@ -7,6 +7,7 @@ import { getInventoryOverview } from "../inventory/store.js";
 import { getAmazonConnectionForTenant, listAmazonConnectionsForTenant } from "../storage/connections.js";
 import { type AgentBlock, blockProtocolPrompt, parseAgentReply } from "./blocks.js";
 import { sellerKnowledge } from "./knowledge.js";
+import { describeAgentTools, runAgentTool } from "./tools.js";
 
 /**
  * SellerAI agent: a chat that answers with the tenant's own business data.
@@ -253,8 +254,36 @@ export function extractMemoryNotes(reply: string) {
 }
 
 /** Answers one user message (typed, or already transcribed from audio). */
+const maxToolRounds = 5;
+const maxToolsPerRound = 4;
+const toolCallPattern = /```tool\s*\n([\s\S]*?)```/g;
+
+function extractToolCalls(reply: string) {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+
+  for (const match of reply.matchAll(toolCallPattern)) {
+    try {
+      const parsed: unknown = JSON.parse(match[1]);
+      for (const candidate of Array.isArray(parsed) ? parsed : [parsed]) {
+        const call = candidate as { name?: unknown; args?: unknown };
+        if (typeof call?.name === "string") {
+          calls.push({
+            name: call.name,
+            args: call.args && typeof call.args === "object" ? call.args as Record<string, unknown> : {}
+          });
+        }
+      }
+    } catch {
+      // A malformed call is ignored; the model gets no result for it.
+    }
+  }
+
+  return calls;
+}
+
 export async function askAgent(input: {
   tenantId: string;
+  sessionToken: string;
   text: string;
   inputKind: "text" | "audio";
   locale: AgentLocale;
@@ -269,11 +298,37 @@ export async function askAgent(input: {
     buildBusinessContext(input.tenantId).catch(() => "Business data is temporarily unavailable."),
     listAgentMemories(input.tenantId).catch(() => [] as AgentMemory[])
   ]);
-  const rawReply = await requestChatCompletion([
+  const conversation: Array<{ role: string; content: string }> = [
     { role: "system", content: systemPrompt(input.locale, context, memories) },
     ...history.map((message) => ({ role: message.role, content: message.content })),
     { role: "user", content: input.text }
-  ]);
+  ];
+  let rawReply = "";
+
+  // Tool loop: the model may ask for data; results go back until it answers.
+  for (let round = 0; ; round += 1) {
+    rawReply = await requestChatCompletion(conversation);
+    const calls = extractToolCalls(rawReply);
+
+    if (!calls.length || round >= maxToolRounds) {
+      break;
+    }
+
+    const results = await Promise.all(calls.slice(0, maxToolsPerRound).map(async (call) => (
+      `### ${call.name} ${JSON.stringify(call.args)}\n${await runAgentTool({ tenantId: input.tenantId, sessionToken: input.sessionToken }, call.name, call.args)}`
+    )));
+    console.info(JSON.stringify({ event: "agent.tools", round, tools: calls.map((call) => call.name) }));
+    conversation.push(
+      { role: "assistant", content: rawReply },
+      {
+        role: "user",
+        content: `TOOL RESULTS (internal, not shown to the user):\n${results.join("\n\n")}\n\n` +
+          "Call more tools if you still need data; otherwise write the final answer for the user now."
+      }
+    );
+  }
+
+  rawReply = rawReply.replace(toolCallPattern, "").trim();
   const { text: reply, notes } = extractMemoryNotes(rawReply);
   await applyMemoryNotes(input.tenantId, notes).catch((error: unknown) => {
     console.warn(JSON.stringify({ event: "agent.memory_failed", error: error instanceof Error ? error.message : "unknown" }));
@@ -306,6 +361,17 @@ function systemPrompt(locale: AgentLocale, context: string, memories: AgentMemor
     "Be concise, friendly and practical; use short paragraphs or bullet lists. Plain text, no markdown headings.",
     "Use the business data below when the question is about the user's stores, products, stock or automations.",
     "Quote real numbers from it; if something is not in the data, say so instead of guessing.",
+    "TOOLS: you can query the user's real data (database and Amazon SP-API) with read-only tools.",
+    "To call tools, reply with ONLY one fenced block with the language \"tool\" containing a JSON object",
+    "{\"name\": \"tool_name\", \"args\": {...}} or an array of up to 4 of them, and nothing else. You will get the results",
+    "in the next message, then you can call more tools or write the final answer. Never show tool blocks in a final answer.",
+    "ALWAYS use tools before saying you don't have data. Never ask the user for numbers that a tool can provide.",
+    "For profit questions combine: list_receipts (investment), inventory_overview (avg costs, units sold),",
+    "product_costs (purchase + FBM shipping cost per product), recent_orders (revenue), fee_estimate, release_calendar/payouts.",
+    "If a tool returns an authorization error, explain which Amazon permission the store must re-authorize in More.",
+    "Available tools:",
+    describeAgentTools(),
+    "",
     "You can only read data. You cannot change prices, stock or settings: explain where in the app to do it",
     "(use an actions block with open_app when it helps).",
     "For Amazon policy, account health and selling questions, answer from the SELLER KNOWLEDGE below with practical steps;",
@@ -457,7 +523,7 @@ async function requestChatCompletion(messages: Array<{ role: string; content: st
       body: JSON.stringify({
         model: config.WARASOFT_AI_AGENT_MODEL,
         messages,
-        max_tokens: 1600,
+        max_tokens: 1800,
         temperature: 0.4
       })
     });

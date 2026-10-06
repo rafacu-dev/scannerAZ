@@ -18,3 +18,9 @@ test("keeps the text when the ui JSON is malformed", () => {
   const { blocks } = parseAgentReply("Hola\n```ui\n{not json\n```");
   assert.deepEqual(blocks, [{ type: "text", text: "Hola" }]);
 });
+
+test("tool fences are not treated as ui blocks", () => {
+  const { blocks } = parseAgentReply("```tool\n{\"name\":\"list_stores\"}\n```");
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].type, "text");
+});

@@ -103,6 +103,7 @@ agentRouter.post("/messages", agentRateLimit, async (req, res, next) => {
 
     const result = await askAgent({
       tenantId: requireTenantId(req),
+      sessionToken: req.scannerazSessionToken ?? "",
       text,
       inputKind: "text",
       locale: localeFrom(req.body?.locale)
@@ -138,6 +139,7 @@ agentRouter.post("/voice", agentRateLimit, (req, res, next) => {
       );
       const result = await askAgent({
         tenantId: requireTenantId(req),
+        sessionToken: req.scannerazSessionToken ?? "",
         text: transcript.slice(0, maxTextLength),
         inputKind: "audio",
         locale
