@@ -259,7 +259,9 @@ const maxToolRounds = 5;
 const maxToolsPerRound = 4;
 const toolCallPattern = /```tool\s*\n([\s\S]*?)```/g;
 
-const missingDataPattern = /no tengo acceso|no tengo (los )?datos|no dispongo|proporci[oó]n(a|ame|es)|necesitar[ií]a que me|don't have access|do not have access|don't have (the )?data|please provide|if you (can )?provide|you would need to provide/i;
+// Also catches "let me check / un momento" replies that announce a lookup
+// without actually calling a tool.
+const missingDataPattern = /voy a (consultar|revisar|buscar|obtener|calcular)|un momento|d[eé]jame (consultar|revisar|ver)|perm[ií]teme (consultar|revisar)|let me (check|look|fetch|pull)|one moment|i'?ll (check|look up|fetch)|no tengo acceso|no tengo (los )?datos|no dispongo|proporci[oó]n(a|ame|es)|necesitar[ií]a que me|don't have access|do not have access|don't have (the )?data|please provide|if you (can )?provide|you would need to provide/i;
 
 function claimsMissingData(reply: string) {
   return missingDataPattern.test(reply);
@@ -296,11 +298,6 @@ export async function askAgent(input: {
   locale: AgentLocale;
 }) {
   const history = await listAgentMessages(input.tenantId, promptHistoryLimit);
-  const userMessage = await saveAgentMessage(input.tenantId, {
-    role: "user",
-    content: input.text,
-    inputKind: input.inputKind
-  });
   const [context, memories] = await Promise.all([
     buildBusinessContext(input.tenantId).catch(() => "Business data is temporarily unavailable."),
     listAgentMemories(input.tenantId).catch(() => [] as AgentMemory[])
@@ -319,12 +316,12 @@ export async function askAgent(input: {
 
     // Small models sometimes answer "I don't have that data" or ask the user
     // for numbers instead of calling a tool: push back once.
-    if (!calls.length && round === 0 && claimsMissingData(rawReply)) {
+    if (!calls.length && round <= 1 && claimsMissingData(rawReply)) {
       conversation.push(
         { role: "assistant", content: rawReply },
         {
           role: "user",
-          content: "(internal) Do not ask the user for data and do not say you lack access: call the tools now " +
+          content: "(internal) Do not announce lookups, ask the user for data or say you lack access: call the tools now " +
             "(e.g. list_receipts, inventory_overview, product_costs, recent_orders) and then answer with real numbers."
         }
       );
@@ -356,6 +353,13 @@ export async function askAgent(input: {
   });
   const { blocks, text } = parseAgentReply(reply);
   const hasRichBlocks = blocks.some((block) => block.type !== "text");
+  // Saved only once there is an answer: a failed request leaves no orphan
+  // question in the history (the app keeps it in the input to retry).
+  const userMessage = await saveAgentMessage(input.tenantId, {
+    role: "user",
+    content: input.text,
+    inputKind: input.inputKind
+  });
   const assistantMessage = await saveAgentMessage(input.tenantId, {
     role: "assistant",
     content: text || reply || "…",
