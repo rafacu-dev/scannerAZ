@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { config } from "../config.js";
-import { getAutomationPool, listRepricingEventsForConnection, listRepricingRulesForConnection } from "../amazon/repricing.js";
+import { getAutomationPool, listRepricingRulesForConnection } from "../amazon/repricing.js";
 import { listRestockRulesForConnection } from "../amazon/restock.js";
 import { getCachedAmazonSellerStoreName } from "../amazon/publicRoutes.js";
 import { getInventoryOverview } from "../inventory/store.js";
@@ -26,13 +26,14 @@ export type AgentMessage = {
 };
 
 export class AgentUnavailableError extends Error {
-  constructor(readonly code: "agent_unavailable" | "transcription_unavailable" | "empty_transcript") {
+  constructor(readonly code: "agent_unavailable" | "agent_quota_exceeded" | "transcription_unavailable" | "empty_transcript") {
     super(code);
   }
 }
 
 const historyLimit = 50;
-const promptHistoryLimit = 20;
+// Fewer turns of history keeps every request (and each tool round) cheaper.
+const promptHistoryLimit = 12;
 const maxContextCharacters = 14_000;
 const localMessages = new Map<string, AgentMessage[]>();
 const localMemories = new Map<string, AgentMemory[]>();
@@ -452,10 +453,9 @@ async function buildBusinessContext(tenantId: string) {
         marketplaceId: stored.marketplaceId || config.AMAZON_MARKETPLACE_ID
       }).catch(() => undefined)
       : undefined;
-    const [repricing, restock, events] = await Promise.all([
+    const [repricing, restock] = await Promise.all([
       listRepricingRulesForConnection(tenantId, connection.id).catch(() => []),
-      listRestockRulesForConnection(tenantId, connection.id).catch(() => []),
-      listRepricingEventsForConnection(tenantId, connection.id, 10).catch(() => [])
+      listRestockRulesForConnection(tenantId, connection.id).catch(() => [])
     ]);
     const activeRepricing = repricing.filter((rule) => rule.enabled);
     const atMinimum = activeRepricing.filter((rule) => rule.lastStatus === "at_minimum");
@@ -465,25 +465,8 @@ async function buildBusinessContext(tenantId: string) {
       `  auto-repricing on for ${activeRepricing.length} SKUs; auto-restock on for ${restock.filter((rule) => rule.enabled).length} SKUs.`
     );
 
-    for (const rule of activeRepricing.slice(0, 25)) {
-      lines.push(
-        `  repricing SKU ${rule.sku} (ASIN ${rule.asin}): ${rule.strategy}${rule.strategy === "undercut" ? ` by $${rule.undercutAmount}` : ""}, ` +
-        `min $${rule.minPrice}, last price ${rule.lastPrice !== undefined ? `$${rule.lastPrice}` : "n/a"}, ` +
-        `cheapest competitor ${rule.lastCompetitorPrice !== undefined ? `$${rule.lastCompetitorPrice}` : "n/a"}, status ${rule.lastStatus ?? "pending"}`
-      );
-    }
-
     if (atMinimum.length) {
-      lines.push(`  ${atMinimum.length} SKUs are stuck at their minimum price: ${atMinimum.slice(0, 10).map((rule) => rule.sku).join(", ")}`);
-    }
-
-    for (const event of events) {
-      lines.push(
-        `  recent ${event.kind} change ${event.createdAt.slice(0, 16)}: SKU ${event.sku}` +
-        (event.kind === "price"
-          ? ` $${event.previousPrice ?? "?"} -> $${event.newPrice ?? "?"}`
-          : ` qty ${event.previousQuantity ?? "?"} -> ${event.newQuantity ?? "?"}`)
-      );
+      lines.push(`  ${atMinimum.length} SKUs are stuck at their minimum price.`);
     }
   }
 
@@ -497,23 +480,7 @@ async function buildBusinessContext(tenantId: string) {
     ` last Amazon sales sync ${summary.lastAmazonSalesSyncAt ?? "never"}.`
   );
 
-  const products = [...inventory.products].sort((left, right) => right.lastActivityAt?.localeCompare(left.lastActivityAt ?? "") ?? 0);
-  const toBuy = products.filter((product) => product.availableQuantity < 0);
-
-  if (toBuy.length) {
-    lines.push("Products to buy (negative stock):");
-    for (const product of toBuy.slice(0, 20)) {
-      lines.push(`  ${product.title} (ASIN ${product.asin ?? "-"}): ${-product.availableQuantity} to buy`);
-    }
-  }
-
-  lines.push("Products (most recent activity first):");
-  for (const product of products.slice(0, 60)) {
-    lines.push(
-      `  ${product.title}${product.asin ? ` (ASIN ${product.asin})` : ""}: available ${product.availableQuantity}, ` +
-      `sold ${product.soldQuantity}, avg cost ${product.averageUnitCostCents !== undefined ? `$${(product.averageUnitCostCents / 100).toFixed(2)}` : "n/a"}`
-    );
-  }
+  lines.push("(Use tools for product-level details, receipts, orders, fees and finances.)");
 
   const text = lines.join("\n");
   return text.length > maxContextCharacters ? `${text.slice(0, maxContextCharacters)}\n…(truncated)` : text;
@@ -561,8 +528,10 @@ async function requestChatCompletion(messages: Array<{ role: string; content: st
   }
 
   if (!response.ok) {
-    console.warn(JSON.stringify({ event: "agent.chat_failed", status: response.status, detail: (await response.text().catch(() => "")).slice(0, 300) }));
-    throw new AgentUnavailableError("agent_unavailable");
+    const detail = (await response.text().catch(() => "")).slice(0, 300);
+    console.warn(JSON.stringify({ event: "agent.chat_failed", status: response.status, detail }));
+    // The gateway key's daily token/budget limit: tell the user plainly.
+    throw new AgentUnavailableError(response.status === 429 && /limit|budget/i.test(detail) ? "agent_quota_exceeded" : "agent_unavailable");
   }
 
   const payload = await response.json().catch(() => undefined) as {

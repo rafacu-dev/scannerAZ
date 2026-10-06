@@ -21,7 +21,7 @@ type AgentTool = {
   run: (context: AgentToolContext, args: ToolArgs) => Promise<unknown>;
 };
 
-const maxResultCharacters = 7000;
+const maxResultCharacters = 5000;
 
 function stringArg(args: ToolArgs, key: string) {
   const value = args[key];
