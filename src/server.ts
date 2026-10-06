@@ -25,6 +25,8 @@ import {
 import { initializeRestockStore } from "./amazon/restock.js";
 import { initializeProductCostStore } from "./amazon/productCosts.js";
 import { initializePushStore, notificationsRouter } from "./notifications/push.js";
+import { agentRouter } from "./agent/routes.js";
+import { initializeAgentStore } from "./agent/agent.js";
 import { amazonRouter } from "./amazon/routes.js";
 import { inventoryRouter } from "./inventory/routes.js";
 import { initializeInventoryStore, reportDuplicateAmazonSaleLines } from "./inventory/store.js";
@@ -376,6 +378,14 @@ app.use(
   requireTenantSession,
   publicTenantRateLimit,
   inventoryRouter
+);
+app.use(
+  "/api/public/agent",
+  markSensitiveResponse,
+  requirePublicAppAccess,
+  requireTenantSession,
+  publicTenantRateLimit,
+  agentRouter
 );
 app.use(
   "/api/public/notifications",
@@ -883,6 +893,7 @@ async function startServer() {
     await initializeRestockStore();
     await initializeProductCostStore();
     await initializePushStore();
+    await initializeAgentStore();
     await consolidateDuplicateAmazonConnections();
     void reportDuplicateAmazonSaleLines().catch((error) => {
       console.error("Could not report duplicate Amazon sale lines", error);

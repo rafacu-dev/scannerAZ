@@ -1790,7 +1790,7 @@ async function attachCatalogImagesToPricingListings(input: {
   }
 }
 
-async function getCachedAmazonSellerStoreName(input: {
+export async function getCachedAmazonSellerStoreName(input: {
   connectionId: string;
   sellerId?: string;
   refreshToken: string;

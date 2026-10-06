@@ -46,6 +46,9 @@ const envSchema = z.object({
   WARASOFT_AI_GATEWAY_URL: z.string().url().optional(),
   WARASOFT_AI_GATEWAY_KEY: z.string().min(1).optional(),
   WARASOFT_AI_INVOICE_MODEL: z.string().trim().min(1).default("gpt-4o-mini"),
+  // SellerAI agent: chat model and speech-to-text model on the Warasoft gateway.
+  WARASOFT_AI_AGENT_MODEL: z.string().trim().min(1).default("gpt-4o-mini"),
+  WARASOFT_AI_TRANSCRIBE_MODEL: z.string().trim().min(1).default("gpt-4o-mini-transcribe"),
   WARASOFT_AI_PROJECT: z.coerce.number().int().positive().optional(),
   INVOICE_EXTRACTION_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(120_000).default(115_000),
   INVOICE_EXTRACTION_MAX_FILE_BYTES: z.coerce.number().int().min(1_000_000).max(50_000_000).default(20_000_000),
