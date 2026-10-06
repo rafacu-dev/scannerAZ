@@ -1756,6 +1756,55 @@ export async function getAmazonSalesSyncState(
  * shortfall is retained as a reconciliation item rather than generating a
  * hidden negative balance.
  */
+/**
+ * Order lines saved as "not fulfilled" (unshipped when an older rule only
+ * deducted shipped units) and not canceled, rebuilt so they can be applied
+ * again under the current rule without waiting for Amazon to update them.
+ */
+export async function listPendingAmazonSaleLines(tenantId: string, connectionId: string): Promise<AmazonInventorySalesLine[]> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{
+    amazon_order_id: string;
+    amazon_order_item_id: string;
+    seller_sku: string | null;
+    asin: string | null;
+    title: string | null;
+    condition: string;
+    quantity_ordered: number;
+    fulfillment_status: string | null;
+    fulfilled_by: string | null;
+    order_created_at: Date | string | null;
+    order_last_updated_at: Date | string | null;
+  }>(
+    `
+      SELECT amazon_order_id, amazon_order_item_id, seller_sku, asin, title, condition, quantity_ordered,
+        fulfillment_status, fulfilled_by, order_created_at, order_last_updated_at
+      FROM scanneraz_inventory_amazon_order_lines
+      WHERE tenant_id = $1 AND connection_id = $2 AND sync_status = 'not_fulfilled'
+        AND (fulfillment_status IS NULL OR (fulfillment_status NOT LIKE '%CANCEL%' AND fulfillment_status NOT LIKE '%UNFULFILLABLE%'))
+      ORDER BY order_created_at DESC NULLS LAST
+      LIMIT 200
+    `,
+    [tenantId, connectionId]
+  );
+
+  return result.rows.map((row) => ({
+    orderId: row.amazon_order_id,
+    orderItemId: row.amazon_order_item_id,
+    ...(row.seller_sku ? { sellerSku: row.seller_sku } : {}),
+    ...(row.asin ? { asin: row.asin } : {}),
+    ...(row.title ? { title: row.title } : {}),
+    conditionType: row.condition,
+    quantityOrdered: row.quantity_ordered,
+    quantityFulfilled: 0,
+    ...(row.fulfillment_status ? { fulfillmentStatus: row.fulfillment_status } : {}),
+    ...(row.fulfilled_by ? { fulfilledBy: row.fulfilled_by } : {}),
+    ...(row.order_created_at ? { createdAt: new Date(row.order_created_at).toISOString() } : {}),
+    ...(row.order_last_updated_at ? { lastUpdatedAt: new Date(row.order_last_updated_at).toISOString() } : {})
+  }));
+}
+
 export async function importAmazonSalesLines(
   tenantId: string,
   connectionId: string,
