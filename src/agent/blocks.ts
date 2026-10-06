@@ -73,7 +73,13 @@ export const agentBlockSchema = z.discriminatedUnion("type", [
   actionsBlock
 ]);
 
-export type AgentBlock = z.infer<typeof agentBlockSchema>;
+/** Added by the server (never by the model): changes awaiting the user's confirmation. */
+export type AgentConfirmBlock = {
+  type: "confirm";
+  items: Array<{ actionId: string; title: string; detail: string; status: "pending" | "confirmed" | "canceled" | "failed"; result?: string }>;
+};
+
+export type AgentBlock = z.infer<typeof agentBlockSchema> | AgentConfirmBlock;
 
 // ```ui (preferred), ```json, or a bare JSON block on its own lines that
 // starts with {"type" / [{"type" — models don't always use the right fence.
@@ -81,7 +87,7 @@ const fencePattern = /```(?:ui|json)?\s*\n([\s\S]*?)```|^[ \t]*(\[?\s*\{\s*"type
 
 /** Splits a model reply into ordered blocks; invalid UI JSON is dropped. */
 export function parseAgentReply(reply: string) {
-  const blocks: AgentBlock[] = [];
+  const blocks: Array<z.infer<typeof agentBlockSchema>> = [];
   let cursor = 0;
 
   const pushText = (value: string) => {

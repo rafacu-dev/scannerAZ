@@ -7,7 +7,8 @@ import { getInventoryOverview } from "../inventory/store.js";
 import { getAmazonConnectionForTenant, listAmazonConnectionsForTenant } from "../storage/connections.js";
 import { type AgentBlock, blockProtocolPrompt, parseAgentReply } from "./blocks.js";
 import { sellerKnowledge } from "./knowledge.js";
-import { describeAgentTools, runAgentTool } from "./tools.js";
+import { describeAgentTools, runAgentTool, type AgentToolContext } from "./tools.js";
+import { getAgentActionStatuses } from "./actions.js";
 
 /**
  * SellerAI agent: a chat that answers with the tenant's own business data.
@@ -116,6 +117,19 @@ export async function listAgentMessages(tenantId: string, limit = historyLimit, 
     [tenantId, limit, before ?? null]
   );
 
+  const actionIds = result.rows.flatMap((row) => (row.blocks ?? []).flatMap((block) => (
+    block.type === "confirm" ? block.items.map((item) => item.actionId) : []
+  )));
+  const statuses = await getAgentActionStatuses(tenantId, actionIds).catch(() => new Map());
+
+  for (const row of result.rows) {
+    for (const block of row.blocks ?? []) {
+      if (block.type === "confirm") {
+        block.items = block.items.map((item) => ({ ...item, ...(statuses.get(item.actionId) ?? {}) }));
+      }
+    }
+  }
+
   return result.rows.reverse().map((row) => ({
     id: row.id,
     role: row.role,
@@ -148,6 +162,11 @@ async function saveAgentMessage(tenantId: string, message: Omit<AgentMessage, "i
     [saved.id, tenantId, saved.role, saved.content, saved.inputKind, saved.createdAt, saved.blocks ? JSON.stringify(saved.blocks) : null]
   );
   return saved;
+}
+
+/** Adds an assistant note to the history (e.g. the outcome of a confirmed change). */
+export async function recordAgentNote(tenantId: string, content: string) {
+  return saveAgentMessage(tenantId, { role: "assistant", content, inputKind: "text" });
 }
 
 export async function clearAgentMessages(tenantId: string) {
@@ -309,6 +328,12 @@ export async function askAgent(input: {
     { role: "user", content: input.text }
   ];
   let rawReply = "";
+  const toolContext: AgentToolContext = {
+    tenantId: input.tenantId,
+    sessionToken: input.sessionToken,
+    locale: input.locale,
+    proposals: []
+  };
 
   // Tool loop: the model may ask for data; results go back until it answers.
   for (let round = 0; ; round += 1) {
@@ -344,7 +369,7 @@ export async function askAgent(input: {
     }
 
     const results = await Promise.all(calls.slice(0, maxToolsPerRound).map(async (call) => (
-      `### ${call.name} ${JSON.stringify(call.args)}\n${await runAgentTool({ tenantId: input.tenantId, sessionToken: input.sessionToken }, call.name, call.args)}`
+      `### ${call.name} ${JSON.stringify(call.args)}\n${await runAgentTool(toolContext, call.name, call.args)}`
     )));
     console.info(JSON.stringify({ event: "agent.tools", round, tools: calls.map((call) => call.name) }));
     conversation.push(
@@ -368,7 +393,23 @@ export async function askAgent(input: {
   await applyMemoryNotes(input.tenantId, notes).catch((error: unknown) => {
     console.warn(JSON.stringify({ event: "agent.memory_failed", error: error instanceof Error ? error.message : "unknown" }));
   });
-  const { blocks, text } = parseAgentReply(reply);
+  const parsed = parseAgentReply(reply);
+  const blocks: AgentBlock[] = [...parsed.blocks];
+  const text = parsed.text;
+
+  // Proposed changes always come with a Confirm/Cancel card added here.
+  if (toolContext.proposals.length) {
+    blocks.push({
+      type: "confirm",
+      items: toolContext.proposals.map((action) => ({
+        actionId: action.id,
+        title: action.title,
+        detail: action.detail,
+        status: "pending" as const
+      }))
+    });
+  }
+
   const hasRichBlocks = blocks.some((block) => block.type !== "text");
   // Saved only once there is an answer: a failed request leaves no orphan
   // question in the history (the app keeps it in the input to retry).
@@ -428,8 +469,13 @@ function systemPrompt(locale: AgentLocale, context: string, memories: AgentMemor
     "Available tools:",
     describeAgentTools(),
     "",
-    "You can only read data. You cannot change prices, stock or settings: explain where in the app to do it",
-    "(use an actions block with open_app when it helps).",
+    "CHANGES: you CAN change automations with set_restock (endless stock), set_repricing and set_product_cost.",
+    "They are only PROPOSED: the app shows the user a card with Confirm/Cancel and nothing changes until they confirm.",
+    "Before proposing, identify the exact listing (search_listings or store_listings) and use its SKU; one call per product.",
+    "For repricing, if the user gave no minimum price, compute a safe one (unit cost + Amazon fees + shipping + small margin,",
+    "using inventory_overview/product_costs and fee_estimate) and explain it; never propose a minimum below cost.",
+    "After proposing, write a short reply listing what will change and ask the user to confirm on the card. Never claim it is already done.",
+    "You cannot change listing prices directly or delete anything; for that, point to the right screen (actions block with open_app).",
     "For Amazon policy, account health and selling questions, answer from the SELLER KNOWLEDGE below with practical steps;",
     "do not send the user elsewhere for basic answers, but mention that policies change and the current rule is in Seller Central Help.",
     "If the user is about to do something that breaks a policy (e.g. retailer-to-customer drop shipping), warn them clearly.",

@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { type AgentAction, createAgentAction } from "./actions.js";
 import { getAmazonFinancialEventGroups, listAmazonRecentOrders } from "../amazon/spapi.js";
 import { getAmazonConnectionForTenant, listAmazonConnectionsForTenant } from "../storage/connections.js";
 import { getInventoryOverview, listInventoryInvoices, summarizeInventorySalesSince } from "../inventory/store.js";
@@ -11,6 +12,9 @@ import { getInventoryOverview, listInventoryInvoices, summarizeInventorySalesSin
 export type AgentToolContext = {
   tenantId: string;
   sessionToken: string;
+  locale: "es" | "en";
+  /** Changes proposed in this turn; the reply shows them for confirmation. */
+  proposals: AgentAction[];
 };
 
 type ToolArgs = Record<string, unknown>;
@@ -75,7 +79,123 @@ function daysAgoIso(days: number) {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
+const text = (context: AgentToolContext, es: string, en: string) => (context.locale === "en" ? en : es);
+
+type StoreListing = { sku: string; asin?: string; title?: string; price?: number };
+
+/** Finds the listing by SKU, or by ASIN when the model only knows the ASIN. */
+async function resolveListing(context: AgentToolContext, storeId: string, args: ToolArgs) {
+  const sku = stringArg(args, "sku");
+  const asin = stringArg(args, "asin")?.toUpperCase();
+  const payload = await callApp(context, `/api/public/amazon/connections/${encodeURIComponent(storeId)}/listings/all`) as
+    { listings?: StoreListing[] } | undefined;
+  const listings = payload?.listings ?? [];
+  const listing = (sku && listings.find((entry) => entry.sku === sku))
+    ?? (asin && listings.find((entry) => entry.asin?.toUpperCase() === asin));
+
+  if (!listing) {
+    throw new Error(`No listing found for ${sku ? `SKU ${sku}` : `ASIN ${asin ?? "?"}`} in this store. Use search_listings first.`);
+  }
+
+  return listing;
+}
+
+async function propose(context: AgentToolContext, action: Omit<AgentAction, "id" | "status" | "createdAt" | "result" | "tenantId">) {
+  const saved = await createAgentAction({ ...action, tenantId: context.tenantId });
+  context.proposals.push(saved);
+  return {
+    status: "awaiting_user_confirmation",
+    actionId: saved.id,
+    summary: `${saved.title}: ${saved.detail}`,
+    instruction: "Not applied yet. Tell the user to tap Confirm on the card below your message."
+  };
+}
+
 export const agentTools: Record<string, AgentTool> = {
+  set_restock: {
+    description: "PROPOSE turning auto-restock (endless stock) on/off for a listing: when FBM stock hits 0 Amazon gets `quantity` units. Needs user confirmation.",
+    args: "{\"storeId\"?: string, \"sku\"?: string, \"asin\"?: string, \"enabled\": boolean, \"quantity\"?: number}",
+    run: async (context, args) => {
+      const store = await resolveStore(context, args);
+      const listing = await resolveListing(context, store.id, args);
+      const enabled = args.enabled !== false;
+      const quantity = Math.round(numberArg(args, "quantity") ?? 5);
+      if (enabled && (quantity < 1 || quantity > 10000)) {
+        throw new Error("quantity must be between 1 and 10000");
+      }
+      return propose(context, {
+        kind: "set_restock",
+        storeId: store.id,
+        sku: listing.sku,
+        payload: { enabled, quantity: Math.max(1, quantity) },
+        title: enabled ? text(context, "Activar stock infinito", "Turn on endless stock") : text(context, "Desactivar stock infinito", "Turn off endless stock"),
+        detail: `${listing.title ?? listing.sku} (SKU ${listing.sku})` + (enabled ? text(context, ` · reponer ${quantity} u al llegar a 0`, ` · restock ${quantity} units at 0`) : "")
+      });
+    }
+  },
+  set_repricing: {
+    description: "PROPOSE an auto-repricing rule for a listing: follow the cheapest competitor (match or undercut by an amount) never below minPrice; or turn it off. Needs user confirmation.",
+    args: "{\"storeId\"?: string, \"sku\"?: string, \"asin\"?: string, \"enabled\": boolean, \"minPrice\": number, \"strategy\"?: \"match\"|\"undercut\", \"undercutAmount\"?: number}",
+    run: async (context, args) => {
+      const store = await resolveStore(context, args);
+      const listing = await resolveListing(context, store.id, args);
+      const enabled = args.enabled !== false;
+      let minPrice = Math.round((numberArg(args, "minPrice") ?? 0) * 100) / 100;
+
+      // Turning a rule off keeps its saved minimum (the API still requires one).
+      if (!enabled && !(minPrice > 0)) {
+        const rules = await callApp(context, `/api/public/amazon/connections/${encodeURIComponent(store.id)}/repricing/rules`) as
+          { rules?: Array<{ sku: string; minPrice?: number }> } | undefined;
+        minPrice = rules?.rules?.find((rule) => rule.sku === listing.sku)?.minPrice ?? 0;
+      }
+      const strategy = stringArg(args, "strategy") === "match" ? "match" : "undercut";
+      const undercutAmount = Math.round((numberArg(args, "undercutAmount") ?? 0.05) * 100) / 100;
+      if (!listing.asin) {
+        throw new Error("This listing has no ASIN.");
+      }
+      if (!(minPrice > 0)) {
+        throw new Error("minPrice is required: compute it from cost + fees or ask the user.");
+      }
+      if (strategy === "undercut" && undercutAmount < 0.01) {
+        throw new Error("undercutAmount must be at least 0.01");
+      }
+      return propose(context, {
+        kind: "set_repricing",
+        storeId: store.id,
+        sku: listing.sku,
+        payload: { asin: listing.asin, enabled, minPrice, strategy, undercutAmount },
+        title: enabled ? text(context, "Activar repricing", "Turn on repricing") : text(context, "Desactivar repricing", "Turn off repricing"),
+        detail: `${listing.title ?? listing.sku} (SKU ${listing.sku})` + (enabled
+          ? text(context,
+            ` · ${strategy === "match" ? "igualar" : `$${undercutAmount.toFixed(2)} por debajo`} del más barato · mínimo $${minPrice.toFixed(2)}`,
+            ` · ${strategy === "match" ? "match" : `undercut by $${undercutAmount.toFixed(2)}`} the cheapest · minimum $${minPrice.toFixed(2)}`)
+          : "")
+      });
+    }
+  },
+  set_product_cost: {
+    description: "PROPOSE saving a listing's purchase cost and optional FBM shipping cost (used for profit). Needs user confirmation.",
+    args: "{\"storeId\"?: string, \"sku\"?: string, \"asin\"?: string, \"costPrice\": number, \"shippingCost\"?: number}",
+    run: async (context, args) => {
+      const store = await resolveStore(context, args);
+      const listing = await resolveListing(context, store.id, args);
+      const costPrice = numberArg(args, "costPrice");
+      const shippingCost = numberArg(args, "shippingCost");
+      if (costPrice === undefined || costPrice < 0) {
+        throw new Error("costPrice is required");
+      }
+      return propose(context, {
+        kind: "set_product_cost",
+        storeId: store.id,
+        sku: listing.sku,
+        payload: { asin: listing.asin, costPrice, ...(shippingCost !== undefined ? { fbmCost: shippingCost } : {}) },
+        title: text(context, "Guardar costo", "Save cost"),
+        detail: `${listing.title ?? listing.sku} · ${text(context, "costo", "cost")} $${costPrice.toFixed(2)}` +
+          (shippingCost !== undefined ? ` · ${text(context, "envío", "shipping")} $${shippingCost.toFixed(2)}` : "")
+      });
+    }
+  },
+
   list_stores: {
     description: "Linked Amazon stores with their storeId, name and seller id.",
     args: "{}",
@@ -380,4 +500,27 @@ export async function runAgentTool(context: AgentToolContext, name: string, args
   } catch (error) {
     return JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
   }
+}
+
+/** Applies a confirmed action through the same API routes the app uses. */
+export async function applyAgentAction(context: Pick<AgentToolContext, "tenantId" | "sessionToken">, action: AgentAction) {
+  const base = `/api/public/amazon/connections/${encodeURIComponent(action.storeId)}`;
+  const sku = encodeURIComponent(action.sku);
+  const fullContext = { ...context, locale: "es" as const, proposals: [] };
+
+  if (action.kind === "set_restock") {
+    return callApp(fullContext, `${base}/restock/rules/${sku}`, { method: "PUT", body: action.payload });
+  }
+
+  if (action.kind === "set_repricing") {
+    return callApp(fullContext, `${base}/repricing/rules/${sku}`, { method: "PUT", body: action.payload });
+  }
+
+  const current = await callApp(fullContext, `${base}/product-costs`) as { costs?: Array<Record<string, unknown>> } | undefined;
+  const existing = current?.costs?.find((entry) => entry.sku === action.sku) ?? {};
+  return callApp(fullContext, `${base}/product-costs/${sku}`, {
+    method: "PUT",
+    // Keep the other saved calculator values; only cost (and FBM shipping) change.
+    body: { ...existing, ...action.payload }
+  });
 }

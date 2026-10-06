@@ -8,9 +8,12 @@ import {
   deleteAgentMemory,
   listAgentMemories,
   listAgentMessages,
+  recordAgentNote,
   transcribeVoiceMessage,
   type AgentLocale
 } from "./agent.js";
+import { getAgentAction, setAgentActionStatus } from "./actions.js";
+import { applyAgentAction } from "./tools.js";
 
 export const agentRouter = express.Router();
 
@@ -94,6 +97,52 @@ agentRouter.delete("/memories/:memoryId", async (req, res, next) => {
   try {
     await deleteAgentMemory(requireTenantId(req), String(req.params.memoryId));
     res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// The user confirms or cancels a change the agent proposed.
+agentRouter.post("/actions/:actionId/:decision", async (req, res, next) => {
+  try {
+    const tenantId = requireTenantId(req);
+    const decision = req.params.decision;
+    const action = await getAgentAction(tenantId, String(req.params.actionId));
+
+    if (!action || (decision !== "confirm" && decision !== "cancel")) {
+      res.status(404).json({ error: "Action not found", code: "action_not_found" });
+      return;
+    }
+
+    if (action.status !== "pending") {
+      res.status(409).json({ error: "Action already handled", code: "action_handled", status: action.status, result: action.result });
+      return;
+    }
+
+    const english = localeFrom(req.body?.locale) === "en";
+
+    if (decision === "cancel") {
+      await setAgentActionStatus(action, "canceled");
+      const note = await recordAgentNote(tenantId, english ? `Canceled: ${action.title} — ${action.detail}` : `Cancelado: ${action.title} — ${action.detail}`);
+      res.json({ status: "canceled", note });
+      return;
+    }
+
+    const outcome = await applyAgentAction({ tenantId, sessionToken: req.scannerazSessionToken ?? "" }, action) as
+      { error?: unknown } | undefined;
+
+    if (!outcome || outcome.error) {
+      const result = String(outcome?.error ?? "Request failed").slice(0, 200);
+      await setAgentActionStatus(action, "failed", result);
+      const note = await recordAgentNote(tenantId, english ? `Could not apply: ${action.title} — ${result}` : `No se pudo aplicar: ${action.title} — ${result}`);
+      res.status(502).json({ status: "failed", result, note });
+      return;
+    }
+
+    await setAgentActionStatus(action, "confirmed");
+    console.info(JSON.stringify({ event: "agent.action_applied", kind: action.kind }));
+    const note = await recordAgentNote(tenantId, english ? `✅ Done: ${action.title} — ${action.detail}` : `✅ Hecho: ${action.title} — ${action.detail}`);
+    res.json({ status: "confirmed", note });
   } catch (error) {
     next(error);
   }
