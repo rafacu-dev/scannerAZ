@@ -8,9 +8,7 @@ import {
   AmazonOrdersRequestError,
   getLwaAccessToken,
   normalizeCatalogSearchResponse,
-  normalizeAmazonOrderSearch,
   searchCatalogItems,
-  searchSellerOrders
 } from "../amazon/spapi.js";
 import {
   detectInvoiceMimeType,
@@ -22,16 +20,12 @@ import {
 } from "./extraction.js";
 import {
   AmazonSalesSyncInProgressError,
-  beginAmazonSalesSync,
-  completeAmazonSalesSync,
   confirmInvoiceExtraction,
   createInventoryInvoice,
   DuplicateInventoryInvoiceError,
   findInvoiceExtractionByDocumentHash,
-  failAmazonSalesSync,
   getAmazonSalesSyncState,
   getInventoryOverview,
-  importAmazonSalesLines,
   listInventoryInvoices,
   getInventoryInvoice,
   deleteInventoryInvoice,
@@ -55,6 +49,7 @@ import {
   saveInvoiceExtraction,
   type InventoryCondition
 } from "./store.js";
+import { syncAmazonSalesForConnection } from "./amazonSalesSync.js";
 
 export const inventoryRouter = express.Router();
 
@@ -402,7 +397,6 @@ inventoryRouter.get("/amazon-sales/:connectionId/sync-state", async (req, res, n
 inventoryRouter.post("/amazon-sales/:connectionId/sync", amazonSalesSyncRateLimit, async (req, res, next) => {
   const connectionId = String(req.params.connectionId ?? "").trim();
   let tenantId: string | undefined;
-  let syncClaimed = false;
 
   try {
     tenantId = requireTenantId(req);
@@ -424,61 +418,15 @@ inventoryRouter.post("/amazon-sales/:connectionId/sync", amazonSalesSyncRateLimi
     }
 
     assertAmazonSpApiConfig(connection.refreshToken);
-    const work = await beginAmazonSalesSync(tenantId, connectionId, from.toISOString());
-    syncClaimed = true;
-    const accessToken = (await getLwaAccessToken(connection.refreshToken)).access_token;
-    let paginationToken = work.paginationToken;
-    let pages = 0;
-    let nextPageToken: string | undefined;
-    const totals = {
-      processedLines: 0,
-      appliedLines: 0,
-      appliedUnits: 0,
-      reversedUnits: 0,
-      unmatchedLines: 0,
-      insufficientLines: 0,
-      notFulfilledLines: 0
-    };
-
-    // Five 100-order pages stays below the documented burst allowance while
-    // giving a first sync enough room for a meaningful inventory reconciliation.
-    do {
-      const response = await searchSellerOrders({
-        refreshToken: connection.refreshToken,
-        accessToken,
-        marketplaceId: connection.marketplaceId || config.AMAZON_MARKETPLACE_ID,
-        lastUpdatedAfter: work.lastUpdatedAfter,
-        paginationToken,
-        maxResultsPerPage: 100
-      });
-      const page = normalizeAmazonOrderSearch(response);
-      const imported = await importAmazonSalesLines(tenantId, connectionId, page.lines);
-
-      totals.processedLines += imported.processedLines;
-      totals.appliedLines += imported.appliedLines;
-      totals.appliedUnits += imported.appliedUnits;
-      totals.reversedUnits += imported.reversedUnits;
-      totals.unmatchedLines += imported.unmatchedLines;
-      totals.insufficientLines += imported.insufficientLines;
-      totals.notFulfilledLines += imported.notFulfilledLines;
-      pages += 1;
-      nextPageToken = page.nextPageToken;
-      paginationToken = nextPageToken;
-    } while (paginationToken && pages < 5);
-
-    const sync = await completeAmazonSalesSync(tenantId, work, nextPageToken);
-    syncClaimed = false;
-    res.json({
+    const result = await syncAmazonSalesForConnection({
+      tenantId,
       connectionId,
-      pages,
-      ...totals,
-      sync
+      refreshToken: connection.refreshToken,
+      marketplaceId: connection.marketplaceId,
+      from
     });
+    res.json({ connectionId, ...result });
   } catch (error) {
-    if (syncClaimed && tenantId) {
-      await failAmazonSalesSync(tenantId, connectionId).catch(() => undefined);
-    }
-
     if (error instanceof AmazonSalesSyncInProgressError) {
       res.status(409).json({ error: error.message });
       return;

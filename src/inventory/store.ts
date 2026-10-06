@@ -1952,14 +1952,24 @@ async function reconcileAmazonSalesLine(
   return { status, appliedUnits: allocationQuantity + backorderQuantity, reversedUnits };
 }
 
+function isCanceledAmazonFulfillment(status?: string) {
+  return Boolean(status && /CANCEL|UNFULFILLABLE/.test(status));
+}
+
 function normalizeAmazonSalesLine(input: AmazonInventorySalesLine) {
   const orderId = normalizeRequiredText(input.orderId, "amazon order id").slice(0, 200);
   const orderItemId = normalizeRequiredText(input.orderItemId, "amazon order item id").slice(0, 200);
   const quantityOrdered = positiveInteger(Math.floor(input.quantityOrdered), "quantityOrdered");
-  const quantityFulfilled = Math.min(
-    quantityOrdered,
-    Math.max(0, Number.isFinite(input.quantityFulfilled) ? Math.floor(input.quantityFulfilled) : 0)
-  );
+  const fulfillmentStatus = normalizeOptionalText(input.fulfillmentStatus)?.toUpperCase().slice(0, 80);
+  // A sale leaves stock as soon as it is ordered, not only once shipped, so
+  // the seller never sells the same unit twice. Canceled/unfulfillable orders
+  // count as 0, which returns any units already deducted to stock.
+  const quantityFulfilled = isCanceledAmazonFulfillment(fulfillmentStatus)
+    ? Math.min(
+      quantityOrdered,
+      Math.max(0, Number.isFinite(input.quantityFulfilled) ? Math.floor(input.quantityFulfilled) : 0)
+    )
+    : quantityOrdered;
   const createdAt = safeAmazonDate(input.createdAt);
   const lastUpdatedAt = safeAmazonDate(input.lastUpdatedAt);
 
@@ -1972,7 +1982,7 @@ function normalizeAmazonSalesLine(input: AmazonInventorySalesLine) {
     condition: inventoryConditionFromAmazon(input.conditionType),
     quantityOrdered,
     quantityFulfilled,
-    fulfillmentStatus: normalizeOptionalText(input.fulfillmentStatus)?.toUpperCase().slice(0, 80),
+    fulfillmentStatus,
     fulfilledBy: normalizeOptionalText(input.fulfilledBy)?.toUpperCase().slice(0, 40),
     createdAt,
     lastUpdatedAt

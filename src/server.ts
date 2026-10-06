@@ -26,6 +26,7 @@ import { initializeRestockStore } from "./amazon/restock.js";
 import { initializeProductCostStore } from "./amazon/productCosts.js";
 import { initializePushStore, notificationsRouter } from "./notifications/push.js";
 import { agentRouter } from "./agent/routes.js";
+import { triggerBackgroundAmazonSalesSync } from "./inventory/amazonSalesSync.js";
 import { initializeAgentStore } from "./agent/agent.js";
 import { amazonRouter } from "./amazon/routes.js";
 import { inventoryRouter } from "./inventory/routes.js";
@@ -358,7 +359,9 @@ app.all("/jobs/repricing/run", (req, res) => {
   }
 
   const result = triggerRepricingCycle();
-  res.status(result.status === "started" ? 202 : 200).json(result);
+  // Same schedule keeps inventory in step with Amazon sales while the app is closed.
+  const salesSync = triggerBackgroundAmazonSalesSync();
+  res.status(result.status === "started" ? 202 : 200).json({ ...result, salesSync: salesSync.status });
 });
 
 app.use("/api/keepa", keepaRouter);
