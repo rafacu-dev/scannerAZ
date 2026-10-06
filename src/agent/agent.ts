@@ -89,11 +89,12 @@ export async function initializeAgentStore() {
   return schemaPromise;
 }
 
-export async function listAgentMessages(tenantId: string, limit = historyLimit): Promise<AgentMessage[]> {
+/** Newest `limit` messages (oldest first), optionally only those before a timestamp, for paging back. */
+export async function listAgentMessages(tenantId: string, limit = historyLimit, before?: string): Promise<AgentMessage[]> {
   const pool = getAutomationPool();
 
   if (!pool) {
-    return (localMessages.get(tenantId) ?? []).slice(-limit);
+    return (localMessages.get(tenantId) ?? []).filter((message) => !before || message.createdAt < before).slice(-limit);
   }
 
   await initializeAgentStore();
@@ -108,11 +109,11 @@ export async function listAgentMessages(tenantId: string, limit = historyLimit):
     `
       SELECT id, role, content, input_kind, created_at, blocks
       FROM scanneraz_agent_messages
-      WHERE tenant_id = $1
+      WHERE tenant_id = $1 AND ($3::timestamptz IS NULL OR created_at < $3::timestamptz)
       ORDER BY created_at DESC
       LIMIT $2
     `,
-    [tenantId, limit]
+    [tenantId, limit, before ?? null]
   );
 
   return result.rows.reverse().map((row) => ({

@@ -58,7 +58,14 @@ function sendAgentError(res: express.Response, error: unknown, next: express.Nex
 agentRouter.get("/messages", async (req, res, next) => {
   try {
     res.setHeader("cache-control", "no-store");
-    res.json({ messages: await listAgentMessages(requireTenantId(req)) });
+    // Paged: ?limit=10&before=<createdAt of the oldest message shown>.
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 50);
+    const before = typeof req.query.before === "string" && !Number.isNaN(Date.parse(req.query.before))
+      ? new Date(req.query.before).toISOString()
+      : undefined;
+    const messages = await listAgentMessages(requireTenantId(req), limit + 1, before);
+    const hasMore = messages.length > limit;
+    res.json({ messages: hasMore ? messages.slice(1) : messages, hasMore });
   } catch (error) {
     next(error);
   }
