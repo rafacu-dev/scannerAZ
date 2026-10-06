@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { getAmazonFinancialEventGroups, listAmazonRecentOrders } from "../amazon/spapi.js";
 import { getAmazonConnectionForTenant, listAmazonConnectionsForTenant } from "../storage/connections.js";
+import { getInventoryOverview, listInventoryInvoices } from "../inventory/store.js";
 
 /**
  * Read-only tools the agent can call. Most reuse the app's own public API
@@ -80,15 +81,91 @@ export const agentTools: Record<string, AgentTool> = {
     args: "{}",
     run: (context) => callApp(context, "/api/public/amazon/connections")
   },
+  // Totals are computed here, not by the model, so long lists are never cut off.
   inventory_overview: {
-    description: "Inventory totals plus every product: available units, sold, received, returns, average unit cost (cents) and value.",
-    args: "{}",
-    run: (context) => callApp(context, "/api/public/inventory/overview")
+    description: "Inventory totals and per-product rows (available, received, sold, returns, average unit cost in $), "
+      + "plus cost of goods sold = units sold x average cost, with how many sold units have a known cost.",
+    args: "{\"search\"?: string}",
+    run: async (context, args) => {
+      const overview = await getInventoryOverview(context.tenantId);
+      const search = stringArg(args, "search")?.toLowerCase();
+      let soldWithCost = 0;
+      let soldWithoutCost = 0;
+      let cogsCents = 0;
+      for (const product of overview.products) {
+        if (product.averageUnitCostCents !== undefined) {
+          soldWithCost += product.soldQuantity;
+          cogsCents += product.soldQuantity * product.averageUnitCostCents;
+        } else {
+          soldWithoutCost += product.soldQuantity;
+        }
+      }
+      const products = overview.products
+        .filter((product) => !search || `${product.title} ${product.asin ?? ""} ${product.sku ?? ""}`.toLowerCase().includes(search))
+        .sort((left, right) => right.soldQuantity - left.soldQuantity)
+        .slice(0, 60)
+        .map((product) => ({
+          title: product.title.slice(0, 70),
+          asin: product.asin,
+          available: product.availableQuantity,
+          received: product.receivedQuantity,
+          sold: product.soldQuantity,
+          avgCost: product.averageUnitCostCents === undefined ? undefined : product.averageUnitCostCents / 100
+        }));
+      return {
+        summary: {
+          ...overview.summary,
+          inventoryValue: overview.summary.inventoryValueCents / 100
+        },
+        costOfGoodsSold: {
+          amount: Math.round(cogsCents) / 100,
+          soldUnitsWithKnownCost: soldWithCost,
+          soldUnitsWithoutCost: soldWithoutCost
+        },
+        productCount: overview.products.length,
+        products,
+        note: overview.products.length > products.length ? `Showing ${products.length} of ${overview.products.length} products (most sold first); use search to filter.` : undefined
+      };
+    }
   },
   list_receipts: {
-    description: "Purchase receipts/invoices recorded in inventory (supplier, date, units, total cost in cents). Use to compute total investment.",
+    description: "ALL recorded purchase receipts summed: total invested ($), units bought, totals by month and by supplier, and the latest receipts.",
     args: "{}",
-    run: (context) => callApp(context, "/api/public/inventory/invoices")
+    run: async (context) => {
+      // Every receipt (not the app's 200-row page) so totals are complete.
+      const invoices = await listInventoryInvoices(context.tenantId, 10_000);
+      const byMonth = new Map<string, { cost: number; units: number; receipts: number }>();
+      const bySupplier = new Map<string, { cost: number; units: number; receipts: number }>();
+      let totalCents = 0;
+      let totalUnits = 0;
+      for (const invoice of invoices) {
+        totalCents += invoice.totalCostCents;
+        totalUnits += invoice.units;
+        for (const [map, key] of [[byMonth, invoice.purchasedAt.slice(0, 7)], [bySupplier, invoice.retailer || "Unknown"]] as const) {
+          const entry = map.get(key) ?? { cost: 0, units: 0, receipts: 0 };
+          entry.cost += invoice.totalCostCents / 100;
+          entry.units += invoice.units;
+          entry.receipts += 1;
+          map.set(key, entry);
+        }
+      }
+      const round = (value: number) => Math.round(value * 100) / 100;
+      return {
+        receiptCount: invoices.length,
+        totalInvested: totalCents / 100,
+        unitsBought: totalUnits,
+        byMonth: [...byMonth.entries()].sort().map(([month, entry]) => ({ month, ...entry, cost: round(entry.cost) })),
+        bySupplier: [...bySupplier.entries()].map(([supplier, entry]) => ({ supplier, ...entry, cost: round(entry.cost) }))
+          .sort((left, right) => right.cost - left.cost),
+        latestReceipts: invoices.slice(0, 15).map((invoice) => ({
+          invoiceId: invoice.id,
+          supplier: invoice.retailer,
+          date: invoice.purchasedAt,
+          units: invoice.units,
+          total: invoice.totalCostCents / 100
+        }))
+      };
+    }
   },
   receipt_detail: {
     description: "Lines of one receipt (products, quantities, unit costs).",

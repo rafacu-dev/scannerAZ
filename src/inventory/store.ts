@@ -1249,7 +1249,7 @@ export async function getInventoryInvoice(tenantId: string, invoiceId: string): 
 }
 
 /** Receipts with their line count, units and total cost, newest first. */
-export async function listInventoryInvoices(tenantId: string): Promise<InventoryInvoiceSummary[]> {
+export async function listInventoryInvoices(tenantId: string, limit = 200): Promise<InventoryInvoiceSummary[]> {
   const inventoryPool = requirePool();
   await initializeInventoryStore();
   const result = await inventoryPool.query<{
@@ -1275,9 +1275,9 @@ export async function listInventoryInvoices(tenantId: string): Promise<Inventory
       WHERE invoices.tenant_id = $1
       GROUP BY invoices.id
       ORDER BY invoices.purchased_at DESC, invoices.created_at DESC
-      LIMIT 200
+      LIMIT $2
     `,
-    [tenantId]
+    [tenantId, Math.max(1, Math.min(limit, 10_000))]
   );
 
   return result.rows.map((row) => ({
