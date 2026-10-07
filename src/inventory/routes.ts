@@ -145,7 +145,7 @@ const saleSchema = z.object({
 const adjustmentSchema = z.object({
   productId: z.string().uuid(),
   mode: z.enum(["add", "remove", "count"]),
-  quantity: z.coerce.number().int().min(0).max(100000),
+  quantity: z.coerce.number().int().min(-100000).max(100000),
   condition: conditionSchema.optional(),
   unitCostCents: z.coerce.number().int().min(0).max(100000000).optional(),
   reason: z.string().trim().max(200).optional(),

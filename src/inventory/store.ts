@@ -987,7 +987,7 @@ export async function recordInventorySale(tenantId: string, input: RecordInvento
 
 export type InventoryAdjustmentInput = {
   productId: string;
-  /** add: units received without a receipt; remove: units taken out; count: physical count result. */
+  /** add/remove use positive quantities; count is a signed stock delta and may be zero. */
   mode: "add" | "remove" | "count";
   quantity: number;
   condition?: InventoryCondition;
@@ -1026,9 +1026,8 @@ export async function recordInventoryAdjustment(tenantId: string, input: Invento
     let notes: string | undefined;
 
     if (input.mode === "count") {
-      const counted = nonNegativeInteger(input.quantity, "quantity");
-      delta = counted - available;
-      notes = `Conteo físico: ${available} → ${counted}${reason ? ` · ${reason}` : ""}`;
+      delta = signedInteger(input.quantity, "quantity");
+      notes = `Ajuste manual: ${available} → ${available + delta}${reason ? ` · ${reason}` : ""}`;
     } else {
       const quantity = positiveInteger(input.quantity, "quantity");
       delta = input.mode === "add" ? quantity : -quantity;
@@ -3203,6 +3202,14 @@ function positiveInteger(value: number, field: string) {
 function nonNegativeInteger(value: number, field: string) {
   if (!Number.isInteger(value) || value < 0) {
     throw new Error(`${field} must be a non-negative integer`);
+  }
+
+  return value;
+}
+
+function signedInteger(value: number, field: string) {
+  if (!Number.isInteger(value)) {
+    throw new Error(`${field} must be an integer`);
   }
 
   return value;
