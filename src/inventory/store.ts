@@ -129,6 +129,8 @@ export type InventoryOverview = {
     unitsToBuy: number;
     productsToBuy: number;
     inventoryValueCents: number;
+    totalInvestedCents: number;
+    soldCostCents: number;
     soldUnits: number;
     customerReturnUnits: number;
     retailerReturnUnits: number;
@@ -2392,6 +2394,8 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
       unitsToBuy: products.reduce((total, product) => total + Math.max(-product.availableQuantity, 0), 0),
       productsToBuy: products.filter((product) => product.availableQuantity < 0).length,
       inventoryValueCents: products.reduce((total, product) => total + product.inventoryValueCents, 0),
+      totalInvestedCents: products.reduce((total, product) => total + ((product.averageUnitCostCents ?? 0) * product.receivedQuantity), 0),
+      soldCostCents: products.reduce((total, product) => total + ((product.averageUnitCostCents ?? 0) * product.soldQuantity), 0),
       soldUnits: products.reduce((total, product) => total + product.soldQuantity, 0),
       customerReturnUnits: products.reduce((total, product) => total + product.customerReturnQuantity, 0),
       retailerReturnUnits: products.reduce((total, product) => total + product.retailerReturnQuantity, 0),
