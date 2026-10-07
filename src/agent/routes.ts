@@ -1,6 +1,7 @@
 import express from "express";
 import multer, { MulterError } from "multer";
 import rateLimit from "express-rate-limit";
+import { config } from "../config.js";
 import {
   AgentUnavailableError,
   askAgent,
@@ -34,6 +35,110 @@ const agentRateLimit = rateLimit({
     res.status(429).json({ error: "Too many messages. Wait a moment.", code: "rate_limited" });
   }
 });
+
+const storefrontAsinSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["products", "complete", "note"],
+  properties: {
+    products: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["asin", "title", "url"],
+        properties: {
+          asin: { type: "string" },
+          title: { type: "string" },
+          url: { type: "string" }
+        }
+      }
+    },
+    complete: { type: "boolean" },
+    note: { type: "string" }
+  }
+} as const;
+
+function responseText(payload: unknown) {
+  if (!payload || typeof payload !== "object") return "";
+  const record = payload as {
+    output_text?: unknown;
+    output?: Array<{ content?: Array<{ text?: unknown }> }>;
+  };
+  if (typeof record.output_text === "string") return record.output_text;
+  return (record.output ?? [])
+    .flatMap((item) => item.content ?? [])
+    .map((item) => typeof item.text === "string" ? item.text : "")
+    .join("")
+    .trim();
+}
+
+function storefrontUrlFrom(value: unknown) {
+  try {
+    const url = new URL(String(value ?? ""));
+    if (url.protocol !== "https:" || !/(^|\.)amazon\.com$/i.test(url.hostname)) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+async function askStorefrontAsins(url: string) {
+  if (!config.WARASOFT_AI_GATEWAY_URL || !config.WARASOFT_AI_GATEWAY_KEY) {
+    throw new AgentUnavailableError("agent_unavailable");
+  }
+
+  const response = await fetch(config.WARASOFT_AI_GATEWAY_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Warasoft-AI-Key": config.WARASOFT_AI_GATEWAY_KEY,
+      ...(config.WARASOFT_AI_PROJECT ? { "X-Warasoft-Project": String(config.WARASOFT_AI_PROJECT) } : {})
+    },
+    signal: AbortSignal.timeout(90_000),
+    body: JSON.stringify({
+      model: config.WARASOFT_AI_AGENT_MODEL,
+      tools: [{ type: "web_search" }],
+      input: [
+        {
+          role: "developer",
+          content: [{
+            type: "input_text",
+            text: "Read only the public Amazon storefront URL provided by the user. Return only ASINs explicitly present in the page or in product links discovered from that page. Do not invent, infer, or search unrelated products. Deduplicate ASINs. If the page is incomplete, set complete to false and explain why in note."
+          }]
+        },
+        {
+          role: "user",
+          content: [{ type: "input_text", text: `Storefront URL: ${url}` }]
+        }
+      ],
+      max_output_tokens: 4_096,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "scanneraz_storefront_asins",
+          strict: true,
+          schema: storefrontAsinSchema
+        }
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const detail = (await response.text().catch(() => "")).slice(0, 240);
+    console.warn(JSON.stringify({ event: "storefront_ai_failed", status: response.status, detail }));
+    throw new AgentUnavailableError(response.status === 429 ? "agent_quota_exceeded" : "agent_unavailable");
+  }
+
+  const text = responseText(await response.json());
+  if (!text) throw new AgentUnavailableError("agent_unavailable");
+  const parsed = JSON.parse(text) as { products?: Array<{ asin?: string; title?: string; url?: string }>; complete?: boolean; note?: string };
+  const products = (parsed.products ?? [])
+    .filter((item) => /^(?:B[A-Z0-9]{9}|[0-9]{10})$/.test(item.asin ?? ""))
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.asin === item.asin) === index)
+    .slice(0, 100);
+  return { url, products, complete: Boolean(parsed.complete), note: String(parsed.note ?? "") };
+}
 
 function requireTenantId(req: express.Request) {
   const tenantId = req.scannerazTenantSession?.tenantId;
@@ -80,6 +185,20 @@ agentRouter.delete("/messages", async (req, res, next) => {
     res.status(204).end();
   } catch (error) {
     next(error);
+  }
+});
+
+agentRouter.post("/storefront-asins", agentRateLimit, async (req, res, next) => {
+  try {
+    const url = storefrontUrlFrom(req.body?.url);
+    if (!url) {
+      res.status(400).json({ error: "A public Amazon storefront URL is required.", code: "invalid_storefront_url" });
+      return;
+    }
+    res.setHeader("cache-control", "no-store");
+    res.json(await askStorefrontAsins(url));
+  } catch (error) {
+    sendAgentError(res, error, next);
   }
 });
 
