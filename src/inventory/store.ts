@@ -987,7 +987,7 @@ export async function recordInventorySale(tenantId: string, input: RecordInvento
 
 export type InventoryAdjustmentInput = {
   productId: string;
-  /** add/remove use positive quantities; count is a signed stock delta and may be zero. */
+  /** add/remove use positive quantities; count is the signed final stock level. */
   mode: "add" | "remove" | "count";
   quantity: number;
   condition?: InventoryCondition;
@@ -1026,8 +1026,9 @@ export async function recordInventoryAdjustment(tenantId: string, input: Invento
     let notes: string | undefined;
 
     if (input.mode === "count") {
-      delta = signedInteger(input.quantity, "quantity");
-      notes = `Ajuste manual: ${available} → ${available + delta}${reason ? ` · ${reason}` : ""}`;
+      const counted = signedInteger(input.quantity, "quantity");
+      delta = counted - available;
+      notes = `Conteo de stock: ${available} → ${counted}${reason ? ` · ${reason}` : ""}`;
     } else {
       const quantity = positiveInteger(input.quantity, "quantity");
       delta = input.mode === "add" ? quantity : -quantity;
@@ -1067,20 +1068,39 @@ export async function recordInventoryAdjustment(tenantId: string, input: Invento
         createdAt
       });
     } else if (delta < 0) {
-      if (available + delta < 0) {
+      const requestedOutbound = -delta;
+      const allocatable = Math.min(requestedOutbound, Math.max(0, available));
+
+      if (input.mode !== "count" && allocatable < requestedOutbound) {
         throw new InsufficientInventoryError();
       }
 
-      await allocateOutboundMovements(client, {
-        tenantId,
-        productId: input.productId,
-        movementType: "adjustment",
-        quantity: -delta,
-        condition,
-        notes,
-        occurredAt,
-        createdAt
-      });
+      if (allocatable > 0) {
+        await allocateOutboundMovements(client, {
+          tenantId,
+          productId: input.productId,
+          movementType: "adjustment",
+          quantity: allocatable,
+          condition,
+          notes,
+          occurredAt,
+          createdAt
+        });
+      }
+
+      const backordered = requestedOutbound - allocatable;
+      if (backordered > 0) {
+        await insertMovement(client, {
+          tenantId,
+          productId: input.productId,
+          movementType: "adjustment",
+          quantityDelta: -backordered,
+          condition,
+          notes,
+          occurredAt,
+          createdAt
+        });
+      }
     }
 
     await client.query("COMMIT");
