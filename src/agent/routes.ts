@@ -64,13 +64,16 @@ function responseText(payload: unknown) {
   const record = payload as {
     output_text?: unknown;
     output?: Array<{ content?: Array<{ text?: unknown }> }>;
+    choices?: Array<{ message?: { content?: unknown } }>;
   };
   if (typeof record.output_text === "string") return record.output_text;
-  return (record.output ?? [])
+  const responseText = (record.output ?? [])
     .flatMap((item) => item.content ?? [])
     .map((item) => typeof item.text === "string" ? item.text : "")
     .join("")
     .trim();
+  if (responseText) return responseText;
+  return record.choices?.map((choice) => typeof choice.message?.content === "string" ? choice.message.content : "").join("").trim() ?? "";
 }
 
 function storefrontUrlFrom(value: unknown) {
@@ -105,7 +108,10 @@ async function askStorefrontAsins(url: string) {
     .slice(0, 500);
   const htmlSnapshot = html.slice(0, 120_000);
 
-  const response = await fetch(config.WARASOFT_AI_GATEWAY_URL, {
+  const prompt = "Extract products from the supplied Amazon storefront HTML snapshot. Return only ASINs that appear literally in the supplied HTML or in the candidate list. Never invent ASINs, placeholder titles, or products from memory. Deduplicate ASINs. If the snapshot is incomplete or contains no product cards, set complete to false and explain why in note.";
+  const userInput = `Storefront URL: ${url}\nCandidate ASINs extracted literally from HTML: ${JSON.stringify(sourceAsins)}\nHTML snapshot:\n${htmlSnapshot}`;
+  const responseUrl = config.WARASOFT_AI_GATEWAY_URL.replace(/responses\/?$/, "chat/completions/");
+  const response = await fetch(responseUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -115,28 +121,13 @@ async function askStorefrontAsins(url: string) {
     signal: AbortSignal.timeout(90_000),
     body: JSON.stringify({
       model: config.WARASOFT_AI_AGENT_MODEL,
-      input: [
-        {
-          role: "developer",
-          content: [{
-            type: "input_text",
-            text: "Extract products from the supplied Amazon storefront HTML snapshot. Return only ASINs that appear literally in the supplied HTML or in the candidate list. Never invent ASINs, placeholder titles, or products from memory. Deduplicate ASINs. If the snapshot is incomplete or contains no product cards, set complete to false and explain why in note."
-          }]
-        },
-        {
-          role: "user",
-          content: [{ type: "input_text", text: `Storefront URL: ${url}\nCandidate ASINs extracted literally from HTML: ${JSON.stringify(sourceAsins)}\nHTML snapshot:\n${htmlSnapshot}` }]
-        }
+      messages: [
+        { role: "system", content: prompt },
+        { role: "user", content: userInput }
       ],
-      max_output_tokens: 4_096,
-      text: {
-        format: {
-          type: "json_schema",
-          name: "scanneraz_storefront_asins",
-          strict: true,
-          schema: storefrontAsinSchema
-        }
-      }
+      max_tokens: 4_096,
+      temperature: 0,
+      response_format: { type: "json_object" }
     })
   });
 
