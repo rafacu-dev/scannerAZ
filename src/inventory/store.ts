@@ -114,6 +114,7 @@ export type InventorySaleRecord = {
   imageUrl?: string;
   quantity: number;
   unitPriceCents?: number;
+  pickup?: boolean;
   status: "shipped" | "pending" | "canceled";
   orderDate: string;
   orderId: string;
@@ -168,6 +169,7 @@ export type AmazonInventorySalesLine = {
   quantityOrdered: number;
   quantityFulfilled: number;
   unitPrice?: number;
+  pickup?: boolean;
   fulfillmentStatus?: string;
   fulfilledBy?: string;
   createdAt?: string;
@@ -319,6 +321,7 @@ type SaleRecordRow = {
   image_url: string | null;
   quantity_ordered: string | number;
   unit_price_cents: string | number | null;
+  pickup: boolean | null;
   fulfillment_status: string | null;
   order_created_at: Date | string | null;
   amazon_order_id: string;
@@ -662,6 +665,7 @@ export async function initializeInventoryStore() {
         fulfillment_status TEXT,
         fulfilled_by TEXT,
         unit_price_cents INTEGER,
+        pickup BOOLEAN,
         order_created_at TIMESTAMPTZ,
         order_last_updated_at TIMESTAMPTZ,
         sync_status TEXT NOT NULL CHECK (sync_status IN ('applied', 'unmatched_product', 'insufficient_stock', 'not_fulfilled')),
@@ -673,6 +677,9 @@ export async function initializeInventoryStore() {
 
       ALTER TABLE scanneraz_inventory_amazon_order_lines
         ADD COLUMN IF NOT EXISTS unit_price_cents INTEGER;
+
+      ALTER TABLE scanneraz_inventory_amazon_order_lines
+        ADD COLUMN IF NOT EXISTS pickup BOOLEAN;
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_amazon_order_lines_tenant_status_idx
       ON scanneraz_inventory_amazon_order_lines (tenant_id, sync_status, updated_at DESC);
@@ -1641,7 +1648,8 @@ export type AmazonSalesSyncWork = {
 export async function beginAmazonSalesSync(
   tenantId: string,
   connectionId: string,
-  initialLastUpdatedAfter: string
+  initialLastUpdatedAfter: string,
+  forceRefresh = false
 ): Promise<AmazonSalesSyncWork> {
   const inventoryPool = requirePool();
   await initializeInventoryStore();
@@ -1691,7 +1699,7 @@ export async function beginAmazonSalesSync(
       ? pendingAfter!
       : new Date(Math.max(
         requestedAfter.getTime(),
-        (priorSyncedAt ? priorSyncedAt.getTime() - 5 * 60 * 1000 : requestedAfter.getTime())
+        (!forceRefresh && priorSyncedAt ? priorSyncedAt.getTime() - 5 * 60 * 1000 : requestedAfter.getTime())
       ));
     const startedAt = canContinue ? pendingStartedAt! : now;
 
@@ -2083,6 +2091,7 @@ function normalizeAmazonSalesLine(input: AmazonInventorySalesLine) {
     asin: normalizeCode(input.asin)?.slice(0, 40),
     title: normalizeOptionalText(input.title)?.slice(0, 500),
     unitPriceCents: input.unitPrice === undefined ? undefined : Math.round(input.unitPrice * 100),
+    pickup: input.pickup,
     condition: inventoryConditionFromAmazon(input.conditionType),
     quantityOrdered,
     quantityFulfilled,
@@ -2118,10 +2127,10 @@ async function upsertAmazonSalesLine(
     `
       INSERT INTO scanneraz_inventory_amazon_order_lines (
         id, tenant_id, connection_id, amazon_order_id, amazon_order_item_id, seller_sku, asin, title,
-        condition, quantity_ordered, desired_quantity, fulfillment_status, fulfilled_by, unit_price_cents,
+        condition, quantity_ordered, desired_quantity, fulfillment_status, fulfilled_by, unit_price_cents, pickup,
         order_created_at, order_last_updated_at, sync_status, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19
       )
       ON CONFLICT (tenant_id, connection_id, amazon_order_id, amazon_order_item_id) DO UPDATE SET
         seller_sku = EXCLUDED.seller_sku,
@@ -2133,6 +2142,7 @@ async function upsertAmazonSalesLine(
         fulfillment_status = EXCLUDED.fulfillment_status,
         fulfilled_by = EXCLUDED.fulfilled_by,
         unit_price_cents = EXCLUDED.unit_price_cents,
+        pickup = EXCLUDED.pickup,
         order_created_at = EXCLUDED.order_created_at,
         order_last_updated_at = EXCLUDED.order_last_updated_at,
         updated_at = EXCLUDED.updated_at
@@ -2153,6 +2163,7 @@ async function upsertAmazonSalesLine(
       line.fulfillmentStatus ?? null,
       line.fulfilledBy ?? null,
       line.unitPriceCents ?? null,
+      line.pickup ?? null,
       line.createdAt ?? null,
       line.lastUpdatedAt ?? null,
       line.quantityFulfilled === 0 ? "not_fulfilled" : "unmatched_product",
@@ -2483,6 +2494,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
         products.image_url,
         lines.quantity_ordered,
         lines.unit_price_cents,
+        lines.pickup,
         lines.fulfillment_status,
         lines.order_created_at,
         lines.amazon_order_id,
@@ -2515,6 +2527,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       ...(row.image_url ? { imageUrl: row.image_url } : {}),
       quantity: numberValue(row.quantity_ordered),
       ...(row.unit_price_cents === null ? {} : { unitPriceCents: numberValue(row.unit_price_cents) }),
+      ...(row.pickup === null ? {} : { pickup: row.pickup }),
       status,
       orderDate,
       orderId: row.amazon_order_id,

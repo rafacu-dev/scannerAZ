@@ -25,8 +25,9 @@ export async function syncAmazonSalesForConnection(input: {
   refreshToken: string;
   marketplaceId?: string;
   from: Date;
+  force?: boolean;
 }) {
-  const work = await beginAmazonSalesSync(input.tenantId, input.connectionId, input.from.toISOString());
+  const work = await beginAmazonSalesSync(input.tenantId, input.connectionId, input.from.toISOString(), input.force);
 
   try {
     const accessToken = (await getLwaAccessToken(input.refreshToken)).access_token;

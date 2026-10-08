@@ -105,7 +105,8 @@ const amazonSalesSyncSchema = z.object({
   // A first sync defaults to ninety days. Amazon keeps order history for a
   // limited period, and selecting a smaller initial window avoids an expensive
   // surprise for a new seller account.
-  from: z.string().datetime().optional()
+  from: z.string().datetime().optional(),
+  refresh: z.boolean().optional().default(false)
 });
 
 const invoiceSchema = z.object({
@@ -433,7 +434,8 @@ inventoryRouter.post("/amazon-sales/:connectionId/sync", amazonSalesSyncRateLimi
       connectionId,
       refreshToken: connection.refreshToken,
       marketplaceId: connection.marketplaceId,
-      from
+      from,
+      force: input.refresh
     });
     res.json({ connectionId, ...result });
   } catch (error) {

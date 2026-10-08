@@ -153,6 +153,7 @@ export type AmazonFulfilledOrderLine = {
   quantityFulfilled: number;
   /** Retail price per unit when the Orders API returns proceeds data. */
   unitPrice?: number;
+  pickup?: boolean;
   fulfillmentStatus?: string;
   fulfilledBy?: string;
   createdAt?: string;
@@ -1174,7 +1175,9 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
       const asin = stringValue(product?.asin)?.toUpperCase();
       const title = stringValue(product?.title);
       const conditionType = stringValue(asRecord(product?.condition)?.conditionType);
+      const pickup = isPickupOrder(order ?? {}, item, fulfillment, itemFulfillment);
       const unitPrice = numericValue(asRecord(asRecord(product?.price)?.unitPrice)?.amount) ??
+        numericValue(asRecord(asRecord(item.price)?.unitPrice)?.amount) ??
         itemUnitPriceFromProceeds(item);
       const quantityOrdered = nonNegativeNumericValue(item.quantityOrdered) ?? 0;
       const explicitFulfilled = nonNegativeNumericValue(itemFulfillment?.quantityFulfilled);
@@ -1192,6 +1195,7 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
         quantityOrdered,
         quantityFulfilled: Math.min(quantityOrdered, quantityFulfilled),
         ...(unitPrice !== undefined ? { unitPrice } : {}),
+        ...(pickup !== undefined ? { pickup } : {}),
         ...(sellerSku ? { sellerSku } : {}),
         ...(asin ? { asin } : {}),
         ...(title ? { title } : {}),
@@ -1218,6 +1222,27 @@ function itemUnitPriceFromProceeds(item: Record<string, unknown>) {
   const amount = numericValue(asRecord(asRecord(itemBreakdown)?.subtotal)?.amount);
   const quantity = nonNegativeNumericValue(item.quantityOrdered);
   return amount !== undefined && quantity && quantity > 0 ? amount / quantity : undefined;
+}
+
+function isPickupOrder(
+  order: Record<string, unknown>,
+  item: Record<string, unknown>,
+  fulfillment: Record<string, unknown> | undefined,
+  itemFulfillment: Record<string, unknown> | undefined
+) {
+  const values = [
+    order.pickup,
+    order.pickupStatus,
+    fulfillment?.pickup,
+    fulfillment?.pickupStatus,
+    item.pickup,
+    item.pickupStatus,
+    itemFulfillment?.pickup,
+    itemFulfillment?.pickupStatus
+  ];
+  const explicit = values.find((value) => typeof value === "boolean");
+  if (typeof explicit === "boolean") return explicit;
+  return values.some((value) => typeof value === "string" && /PICKUP|PICKED_UP/i.test(value)) ? true : undefined;
 }
 
 export async function getSellerListingItem(input: {
