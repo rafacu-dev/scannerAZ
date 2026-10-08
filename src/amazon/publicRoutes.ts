@@ -848,10 +848,16 @@ publicAmazonRouter.get("/connections/:connectionId/repricing/history", async (re
     const limit = Number.isInteger(requestedLimit) && requestedLimit >= 1 && requestedLimit <= 500
       ? requestedLimit
       : 100;
+    const requestedOffset = Number(req.query.offset ?? 0);
+    const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0 && requestedOffset <= 10000
+      ? requestedOffset
+      : 0;
+    const events = await listRepricingEventsForConnection(tenantId, connectionId, limit + 1, offset);
 
     res.json({
       connectionId,
-      events: await listRepricingEventsForConnection(tenantId, connectionId, limit),
+      events: events.slice(0, limit),
+      hasMore: events.length > limit,
     });
   } catch (error) {
     next(error);

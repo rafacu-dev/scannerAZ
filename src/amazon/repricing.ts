@@ -268,7 +268,7 @@ function eventFromRow(row: RepricingEventRow): RepricingEvent {
   };
 }
 
-export async function listRepricingEventsForConnection(tenantId: string, connectionId: string, limit = 100) {
+export async function listRepricingEventsForConnection(tenantId: string, connectionId: string, limit = 100, offset = 0) {
   const connectionPool = getPool();
 
   if (connectionPool) {
@@ -278,9 +278,9 @@ export async function listRepricingEventsForConnection(tenantId: string, connect
         SELECT * FROM scanneraz_repricing_events
         WHERE tenant_id = $1 AND connection_id = $2
         ORDER BY created_at DESC, id DESC
-        LIMIT $3
+        LIMIT $3 OFFSET $4
       `,
-      [tenantId, connectionId, limit]
+      [tenantId, connectionId, limit, offset]
     );
     return result.rows.map(eventFromRow);
   }
@@ -288,7 +288,7 @@ export async function listRepricingEventsForConnection(tenantId: string, connect
   assertLocalStoreAllowed();
   return localEvents
     .filter((event) => event.tenantId === tenantId && event.connectionId === connectionId)
-    .slice(-limit)
+    .slice(-(limit + offset), offset ? -offset : undefined)
     .reverse()
     .map(({ tenantId: _tenantId, ...event }) => event);
 }
