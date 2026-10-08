@@ -154,6 +154,7 @@ export type AmazonFulfilledOrderLine = {
   /** Retail price per unit when the Orders API returns proceeds data. */
   unitPrice?: number;
   pickup?: boolean;
+  shippingStatus?: "pending_pickup" | "picked_up" | "out_for_delivery" | "delivered";
   fulfillmentStatus?: string;
   fulfilledBy?: string;
   createdAt?: string;
@@ -226,7 +227,7 @@ export function buildAmazonOrdersSearchUrl(input: {
   url.searchParams.set("lastUpdatedAfter", input.lastUpdatedAfter);
   url.searchParams.set("maxResultsPerPage", String(Math.max(1, Math.min(input.maxResultsPerPage ?? 100, 100))));
   // Proceeds exposes the unit price without requesting buyer or recipient PII.
-  url.searchParams.set("includedData", "FULFILLMENT,PROCEEDS");
+  url.searchParams.set("includedData", "FULFILLMENT,PROCEEDS,PACKAGES");
 
   if (input.paginationToken) {
     url.searchParams.set("paginationToken", input.paginationToken);
@@ -1164,6 +1165,7 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
     const fulfillment = asRecord(order?.fulfillment);
     const fulfillmentStatus = stringValue(fulfillment?.fulfillmentStatus)?.toUpperCase();
     const fulfilledBy = stringValue(fulfillment?.fulfilledBy)?.toUpperCase();
+    const shippingStatus = normalizePackageShippingStatus(order?.packages);
     const createdAt = isoDateValue(order?.createdTime);
     const lastUpdatedAt = isoDateValue(order?.lastUpdatedTime);
 
@@ -1196,6 +1198,7 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
         quantityFulfilled: Math.min(quantityOrdered, quantityFulfilled),
         ...(unitPrice !== undefined ? { unitPrice } : {}),
         ...(pickup !== undefined ? { pickup } : {}),
+        ...(shippingStatus ? { shippingStatus } : {}),
         ...(sellerSku ? { sellerSku } : {}),
         ...(asin ? { asin } : {}),
         ...(title ? { title } : {}),
@@ -1213,6 +1216,21 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
     lines: orders,
     nextPageToken: stringValue(pagination?.nextToken)
   };
+}
+
+function normalizePackageShippingStatus(packages: unknown) {
+  const statuses = recordArray(packages).flatMap((packageRecord) => {
+    const packageStatus = asRecord(asRecord(packageRecord)?.packageStatus);
+    return [stringValue(packageStatus?.status), stringValue(packageStatus?.detailedStatus)]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.toUpperCase());
+  });
+
+  if (statuses.some((status) => status === "DELIVERED" || status.includes("DELIVERED"))) return "delivered" as const;
+  if (statuses.some((status) => status === "OUT_FOR_DELIVERY" || status.includes("OUT_FOR_DELIVERY"))) return "out_for_delivery" as const;
+  if (statuses.some((status) => status === "IN_TRANSIT" || status.includes("PICKED_UP") || status.includes("PICKUP_COMPLETED"))) return "picked_up" as const;
+  if (statuses.some((status) => status.includes("PENDING_PICK_UP") || status === "PENDING")) return "pending_pickup" as const;
+  return undefined;
 }
 
 function itemUnitPriceFromProceeds(item: Record<string, unknown>) {
