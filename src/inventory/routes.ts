@@ -181,7 +181,6 @@ const retailerReturnSchema = z.object({
 });
 
 const salesColumnSchema = z.object({
-  connectionId: z.string().trim().min(1).max(200),
   name: z.string().trim().min(1).max(80)
 });
 
@@ -221,7 +220,7 @@ inventoryRouter.get("/sales", async (req, res, next) => {
 
 inventoryRouter.get("/sales/columns", async (req, res, next) => {
   try {
-    res.json({ columns: await listInventorySalesColumns(requireTenantId(req), String(req.query.connectionId ?? "")) });
+    res.json({ columns: await listInventorySalesColumns(requireTenantId(req)) });
   } catch (error) {
     next(error);
   }
@@ -230,7 +229,7 @@ inventoryRouter.get("/sales/columns", async (req, res, next) => {
 inventoryRouter.post("/sales/columns", async (req, res, next) => {
   try {
     const input = salesColumnSchema.parse(req.body);
-    res.status(201).json({ column: await createInventorySalesColumn(requireTenantId(req), input.connectionId, input.name) });
+    res.status(201).json({ column: await createInventorySalesColumn(requireTenantId(req), input.name) });
   } catch (error) {
     next(error);
   }

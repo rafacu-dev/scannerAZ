@@ -713,6 +713,12 @@ export async function initializeInventoryStore() {
       ALTER TABLE scanneraz_inventory_sales_columns
         ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
 
+      ALTER TABLE scanneraz_inventory_sales_columns
+        DROP CONSTRAINT IF EXISTS scanneraz_inventory_sales_columns_tenant_id_connection_id_name_key;
+
+      ALTER TABLE scanneraz_inventory_sales_columns
+        ALTER COLUMN connection_id DROP NOT NULL;
+
       CREATE TABLE IF NOT EXISTS scanneraz_inventory_sales_column_values (
         column_id TEXT NOT NULL REFERENCES scanneraz_inventory_sales_columns(id) ON DELETE CASCADE,
         sale_id TEXT NOT NULL REFERENCES scanneraz_inventory_amazon_order_lines(id) ON DELETE CASCADE,
@@ -721,6 +727,35 @@ export async function initializeInventoryStore() {
         updated_at TIMESTAMPTZ NOT NULL,
         PRIMARY KEY (column_id, sale_id)
       );
+
+      DO $$
+      DECLARE duplicate_column RECORD;
+      BEGIN
+        FOR duplicate_column IN
+          SELECT duplicate.id AS duplicate_id, keeper.id AS keeper_id
+          FROM scanneraz_inventory_sales_columns AS duplicate
+          JOIN scanneraz_inventory_sales_columns AS keeper
+            ON keeper.tenant_id = duplicate.tenant_id
+            AND keeper.name = duplicate.name
+            AND keeper.id < duplicate.id
+        LOOP
+          INSERT INTO scanneraz_inventory_sales_column_values (column_id, sale_id, tenant_id, checked, updated_at)
+          SELECT duplicate_column.keeper_id, column_value.sale_id, column_value.tenant_id, column_value.checked, column_value.updated_at
+          FROM scanneraz_inventory_sales_column_values AS column_value
+          WHERE column_value.column_id = duplicate_column.duplicate_id
+          ON CONFLICT (column_id, sale_id) DO UPDATE
+            SET checked = scanneraz_inventory_sales_column_values.checked OR EXCLUDED.checked,
+                updated_at = GREATEST(scanneraz_inventory_sales_column_values.updated_at, EXCLUDED.updated_at);
+
+          DELETE FROM scanneraz_inventory_sales_columns
+          WHERE id = duplicate_column.duplicate_id;
+        END LOOP;
+      END $$;
+
+      UPDATE scanneraz_inventory_sales_columns SET connection_id = NULL WHERE connection_id IS NOT NULL;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS scanneraz_inventory_sales_columns_tenant_name_idx
+      ON scanneraz_inventory_sales_columns (tenant_id, name);
 
       CREATE TABLE IF NOT EXISTS scanneraz_inventory_amazon_sale_syncs (
         tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
@@ -2596,12 +2631,12 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
   });
 }
 
-export async function listInventorySalesColumns(tenantId: string, connectionId: string): Promise<InventorySalesColumn[]> {
+export async function listInventorySalesColumns(tenantId: string): Promise<InventorySalesColumn[]> {
   const inventoryPool = requirePool();
   await initializeInventoryStore();
   const result = await inventoryPool.query<{
     id: string;
-    connection_id: string;
+    connection_id: string | null;
     name: string;
     position: number;
     created_at: Date | string;
@@ -2613,16 +2648,16 @@ export async function listInventorySalesColumns(tenantId: string, connectionId: 
       FROM scanneraz_inventory_sales_columns AS columns
       LEFT JOIN scanneraz_inventory_sales_column_values AS column_values
         ON column_values.column_id = columns.id AND column_values.tenant_id = columns.tenant_id
-      WHERE columns.tenant_id = $1 AND columns.connection_id = $2
+      WHERE columns.tenant_id = $1
       GROUP BY columns.id
       ORDER BY columns.position ASC, columns.created_at ASC, columns.id ASC
     `,
-    [tenantId, normalizeRequiredText(connectionId, "connectionId")]
+    [tenantId]
   );
 
   return result.rows.map((row) => ({
     id: row.id,
-    connectionId: row.connection_id,
+    connectionId: row.connection_id ?? "",
     name: row.name,
     position: row.position,
     checkedSaleIds: row.checked_sale_ids ?? [],
@@ -2630,30 +2665,30 @@ export async function listInventorySalesColumns(tenantId: string, connectionId: 
   }));
 }
 
-export async function createInventorySalesColumn(tenantId: string, connectionId: string, name: string) {
+export async function createInventorySalesColumn(tenantId: string, name: string) {
   const inventoryPool = requirePool();
   await initializeInventoryStore();
-  const result = await inventoryPool.query<{ id: string; connection_id: string; name: string; position: number; created_at: Date | string }>(
+  const result = await inventoryPool.query<{ id: string; connection_id: string | null; name: string; position: number; created_at: Date | string }>(
     `
       INSERT INTO scanneraz_inventory_sales_columns (id, tenant_id, connection_id, name, position, created_at)
-      VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position), -1) + 1 FROM scanneraz_inventory_sales_columns WHERE tenant_id = $2 AND connection_id = $3), $5)
+      VALUES ($1, $2, NULL, $3, (SELECT COALESCE(MAX(position), -1) + 1 FROM scanneraz_inventory_sales_columns WHERE tenant_id = $2), $4)
       RETURNING id, connection_id, name, position, created_at
     `,
-    [crypto.randomUUID(), tenantId, normalizeRequiredText(connectionId, "connectionId"), normalizeRequiredText(name, "name").slice(0, 80), new Date()]
+    [crypto.randomUUID(), tenantId, normalizeRequiredText(name, "name").slice(0, 80), new Date()]
   );
   const row = result.rows[0]!;
-  return { id: row.id, connectionId: row.connection_id, name: row.name, position: row.position, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn;
+  return { id: row.id, connectionId: row.connection_id ?? "", name: row.name, position: row.position, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn;
 }
 
 export async function updateInventorySalesColumn(tenantId: string, columnId: string, name: string) {
   const inventoryPool = requirePool();
   await initializeInventoryStore();
-  const result = await inventoryPool.query<{ id: string; connection_id: string; name: string; position: number; created_at: Date | string }>(
+  const result = await inventoryPool.query<{ id: string; connection_id: string | null; name: string; position: number; created_at: Date | string }>(
     `UPDATE scanneraz_inventory_sales_columns SET name = $3 WHERE id = $1 AND tenant_id = $2 RETURNING id, connection_id, name, position, created_at`,
     [columnId, tenantId, normalizeRequiredText(name, "name").slice(0, 80)]
   );
   const row = result.rows[0];
-  return row ? { id: row.id, connectionId: row.connection_id, name: row.name, position: row.position, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn : undefined;
+  return row ? { id: row.id, connectionId: row.connection_id ?? "", name: row.name, position: row.position, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn : undefined;
 }
 
 export async function reorderInventorySalesColumns(tenantId: string, columnIds: string[]) {
@@ -2688,7 +2723,7 @@ export async function setInventorySalesColumnValue(
       SELECT columns.id, sales.id, $3, $4, $5
       FROM scanneraz_inventory_sales_columns AS columns
       JOIN scanneraz_inventory_amazon_order_lines AS sales
-        ON sales.id = $2 AND sales.tenant_id = columns.tenant_id AND sales.connection_id = columns.connection_id
+        ON sales.id = $2 AND sales.tenant_id = columns.tenant_id
       WHERE columns.id = $1 AND columns.tenant_id = $3
       ON CONFLICT (column_id, sale_id) DO UPDATE SET checked = EXCLUDED.checked, updated_at = EXCLUDED.updated_at
       RETURNING checked
