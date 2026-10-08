@@ -114,6 +114,7 @@ export type InventorySaleRecord = {
   sku?: string;
   imageUrl?: string;
   quantity: number;
+  pendingQuantity: number;
   unitPriceCents?: number;
   pickup?: boolean;
   status: "shipped" | "pending" | "canceled";
@@ -331,6 +332,7 @@ type SaleRecordRow = {
   sku: string | null;
   image_url: string | null;
   quantity_ordered: string | number;
+  desired_quantity: string | number;
   unit_price_cents: string | number | null;
   pickup: boolean | null;
   fulfillment_status: string | null;
@@ -2522,24 +2524,41 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
   const boundedDays = Math.max(1, Math.min(Math.floor(days), 365));
   const result = await inventoryPool.query<SaleRecordRow>(
     `
+      WITH ranked_sales AS (
+        SELECT lines.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY lines.tenant_id, lines.amazon_order_id, lines.amazon_order_item_id
+            ORDER BY lines.updated_at DESC, lines.created_at DESC
+          ) AS row_number
+        FROM scanneraz_inventory_amazon_order_lines AS lines
+        WHERE lines.tenant_id = $1
+      )
       SELECT
         lines.id,
         lines.connection_id,
-        COALESCE(products.title, lines.title, lines.seller_sku, lines.asin, 'Amazon sale') AS title,
+        COALESCE(lines.title, products.title, lines.seller_sku, lines.asin, 'Amazon sale') AS title,
         COALESCE(products.asin, lines.asin) AS asin,
         COALESCE(products.sku, lines.seller_sku) AS sku,
-        products.image_url,
+        COALESCE(products.image_url, (
+          SELECT mappings.image_url
+          FROM scanneraz_inventory_asin_mappings AS mappings
+          WHERE mappings.tenant_id = lines.tenant_id
+            AND mappings.asin = lines.asin
+            AND mappings.image_url IS NOT NULL
+          LIMIT 1
+        )) AS image_url,
         lines.quantity_ordered,
+        lines.desired_quantity,
         lines.unit_price_cents,
         lines.pickup,
         lines.fulfillment_status,
         lines.order_created_at,
         lines.amazon_order_id,
         lines.fulfilled_by
-      FROM scanneraz_inventory_amazon_order_lines AS lines
+      FROM ranked_sales AS lines
       LEFT JOIN scanneraz_inventory_products AS products
         ON products.id = lines.product_id AND products.tenant_id = lines.tenant_id
-      WHERE lines.tenant_id = $1
+      WHERE lines.row_number = 1
         AND COALESCE(lines.order_created_at, lines.updated_at) >= NOW() - ($2::integer * INTERVAL '1 day')
       ORDER BY COALESCE(lines.order_created_at, lines.updated_at) DESC, lines.created_at DESC
       LIMIT 2000
@@ -2555,6 +2574,8 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
         ? "shipped"
         : "pending";
     const orderDate = row.order_created_at ? new Date(row.order_created_at).toISOString() : new Date().toISOString();
+    const quantityOrdered = numberValue(row.quantity_ordered);
+    const fulfilledQuantity = status === "canceled" ? 0 : Math.min(quantityOrdered, Math.max(0, numberValue(row.desired_quantity)));
 
     return {
       id: row.id,
@@ -2563,7 +2584,8 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       ...(row.asin ? { asin: row.asin } : {}),
       ...(row.sku ? { sku: row.sku } : {}),
       ...(row.image_url ? { imageUrl: row.image_url } : {}),
-      quantity: numberValue(row.quantity_ordered),
+      quantity: fulfilledQuantity,
+      pendingQuantity: status === "canceled" ? 0 : Math.max(0, quantityOrdered - fulfilledQuantity),
       ...(row.unit_price_cents === null ? {} : { unitPriceCents: numberValue(row.unit_price_cents) }),
       ...(row.pickup === null ? {} : { pickup: row.pickup }),
       status,
