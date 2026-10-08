@@ -128,6 +128,7 @@ export type InventorySalesColumn = {
   name: string;
   checkedSaleIds: string[];
   createdAt: string;
+  position: number;
 };
 
 export type InventoryReturnCase = {
@@ -699,12 +700,16 @@ export async function initializeInventoryStore() {
         tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
         connection_id TEXT NOT NULL,
         name TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ NOT NULL,
         UNIQUE (tenant_id, connection_id, name)
       );
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_sales_columns_tenant_connection_idx
       ON scanneraz_inventory_sales_columns (tenant_id, connection_id, created_at ASC);
+
+      ALTER TABLE scanneraz_inventory_sales_columns
+        ADD COLUMN IF NOT EXISTS position INTEGER NOT NULL DEFAULT 0;
 
       CREATE TABLE IF NOT EXISTS scanneraz_inventory_sales_column_values (
         column_id TEXT NOT NULL REFERENCES scanneraz_inventory_sales_columns(id) ON DELETE CASCADE,
@@ -2576,18 +2581,19 @@ export async function listInventorySalesColumns(tenantId: string, connectionId: 
     id: string;
     connection_id: string;
     name: string;
+    position: number;
     created_at: Date | string;
     checked_sale_ids: string[] | null;
   }>(
     `
-      SELECT columns.id, columns.connection_id, columns.name, columns.created_at,
+      SELECT columns.id, columns.connection_id, columns.name, columns.position, columns.created_at,
         COALESCE(array_agg(column_values.sale_id) FILTER (WHERE column_values.checked = TRUE), '{}') AS checked_sale_ids
       FROM scanneraz_inventory_sales_columns AS columns
       LEFT JOIN scanneraz_inventory_sales_column_values AS column_values
         ON column_values.column_id = columns.id AND column_values.tenant_id = columns.tenant_id
       WHERE columns.tenant_id = $1 AND columns.connection_id = $2
       GROUP BY columns.id
-      ORDER BY columns.created_at ASC, columns.id ASC
+      ORDER BY columns.position ASC, columns.created_at ASC, columns.id ASC
     `,
     [tenantId, normalizeRequiredText(connectionId, "connectionId")]
   );
@@ -2596,6 +2602,7 @@ export async function listInventorySalesColumns(tenantId: string, connectionId: 
     id: row.id,
     connectionId: row.connection_id,
     name: row.name,
+    position: row.position,
     checkedSaleIds: row.checked_sale_ids ?? [],
     createdAt: new Date(row.created_at).toISOString()
   }));
@@ -2604,16 +2611,45 @@ export async function listInventorySalesColumns(tenantId: string, connectionId: 
 export async function createInventorySalesColumn(tenantId: string, connectionId: string, name: string) {
   const inventoryPool = requirePool();
   await initializeInventoryStore();
-  const result = await inventoryPool.query<{ id: string; connection_id: string; name: string; created_at: Date | string }>(
+  const result = await inventoryPool.query<{ id: string; connection_id: string; name: string; position: number; created_at: Date | string }>(
     `
-      INSERT INTO scanneraz_inventory_sales_columns (id, tenant_id, connection_id, name, created_at)
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, connection_id, name, created_at
+      INSERT INTO scanneraz_inventory_sales_columns (id, tenant_id, connection_id, name, position, created_at)
+      VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position), -1) + 1 FROM scanneraz_inventory_sales_columns WHERE tenant_id = $2 AND connection_id = $3), $5)
+      RETURNING id, connection_id, name, position, created_at
     `,
     [crypto.randomUUID(), tenantId, normalizeRequiredText(connectionId, "connectionId"), normalizeRequiredText(name, "name").slice(0, 80), new Date()]
   );
   const row = result.rows[0]!;
-  return { id: row.id, connectionId: row.connection_id, name: row.name, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn;
+  return { id: row.id, connectionId: row.connection_id, name: row.name, position: row.position, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn;
+}
+
+export async function updateInventorySalesColumn(tenantId: string, columnId: string, name: string) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{ id: string; connection_id: string; name: string; position: number; created_at: Date | string }>(
+    `UPDATE scanneraz_inventory_sales_columns SET name = $3 WHERE id = $1 AND tenant_id = $2 RETURNING id, connection_id, name, position, created_at`,
+    [columnId, tenantId, normalizeRequiredText(name, "name").slice(0, 80)]
+  );
+  const row = result.rows[0];
+  return row ? { id: row.id, connectionId: row.connection_id, name: row.name, position: row.position, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn : undefined;
+}
+
+export async function reorderInventorySalesColumns(tenantId: string, columnIds: string[]) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const client = await inventoryPool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const [position, columnId] of columnIds.entries()) {
+      await client.query(`UPDATE scanneraz_inventory_sales_columns SET position = $3 WHERE id = $1 AND tenant_id = $2`, [columnId, tenantId, position]);
+    }
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function setInventorySalesColumnValue(

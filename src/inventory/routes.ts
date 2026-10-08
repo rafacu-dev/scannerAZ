@@ -31,6 +31,8 @@ import {
   createInventorySalesColumn,
   setInventorySalesColumnValue,
   deleteInventorySalesColumn,
+  updateInventorySalesColumn,
+  reorderInventorySalesColumns,
   listInventoryInvoices,
   getInventoryInvoice,
   deleteInventoryInvoice,
@@ -188,6 +190,10 @@ const salesColumnValueSchema = z.object({
   checked: z.boolean()
 });
 
+const salesColumnOrderSchema = z.object({
+  columnIds: z.array(z.string().trim().min(1).max(200)).max(50)
+});
+
 const resolveReturnSchema = z.object({
   disposition: z.enum(["restock", "dispose", "refund", "return_to_stock"]),
   condition: conditionSchema.optional(),
@@ -225,6 +231,30 @@ inventoryRouter.post("/sales/columns", async (req, res, next) => {
   try {
     const input = salesColumnSchema.parse(req.body);
     res.status(201).json({ column: await createInventorySalesColumn(requireTenantId(req), input.connectionId, input.name) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.patch("/sales/columns/:columnId", async (req, res, next) => {
+  try {
+    const name = z.string().trim().min(1).max(80).parse(req.body?.name);
+    const column = await updateInventorySalesColumn(requireTenantId(req), String(req.params.columnId ?? ""), name);
+    if (!column) {
+      res.status(404).json({ error: "No encontramos esa columna." });
+      return;
+    }
+    res.json({ column });
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.put("/sales/columns/order", async (req, res, next) => {
+  try {
+    const input = salesColumnOrderSchema.parse(req.body);
+    await reorderInventorySalesColumns(requireTenantId(req), input.columnIds);
+    res.status(204).end();
   } catch (error) {
     next(error);
   }
