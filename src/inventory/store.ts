@@ -118,6 +118,7 @@ export type InventorySaleRecord = {
   unitPriceCents?: number;
   pickup?: boolean;
   shippingStatus?: "pending_pickup" | "picked_up" | "out_for_delivery" | "delivered";
+  fulfillmentStatus?: string;
   status: "shipped" | "pending" | "canceled";
   orderDate: string;
   orderId: string;
@@ -2637,6 +2638,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       ...(row.unit_price_cents === null ? {} : { unitPriceCents: numberValue(row.unit_price_cents) }),
       ...(row.pickup === null ? {} : { pickup: row.pickup }),
       ...(row.shipping_status ? { shippingStatus: row.shipping_status as InventorySaleRecord["shippingStatus"] } : {}),
+      ...(row.fulfillment_status ? { fulfillmentStatus: row.fulfillment_status } : {}),
       status,
       orderDate,
       orderId: row.amazon_order_id,
