@@ -27,6 +27,10 @@ import {
   getAmazonSalesSyncState,
   getInventoryOverview,
   listInventorySales,
+  listInventorySalesColumns,
+  createInventorySalesColumn,
+  setInventorySalesColumnValue,
+  deleteInventorySalesColumn,
   listInventoryInvoices,
   getInventoryInvoice,
   deleteInventoryInvoice,
@@ -174,6 +178,16 @@ const retailerReturnSchema = z.object({
   occurredAt: occurredAtSchema
 });
 
+const salesColumnSchema = z.object({
+  connectionId: z.string().trim().min(1).max(200),
+  name: z.string().trim().min(1).max(80)
+});
+
+const salesColumnValueSchema = z.object({
+  saleId: z.string().trim().min(1).max(200),
+  checked: z.boolean()
+});
+
 const resolveReturnSchema = z.object({
   disposition: z.enum(["restock", "dispose", "refund", "return_to_stock"]),
   condition: conditionSchema.optional(),
@@ -194,6 +208,50 @@ inventoryRouter.get("/sales", async (req, res, next) => {
   try {
     const days = Number(req.query.days ?? 90);
     res.json({ sales: await listInventorySales(requireTenantId(req), Number.isFinite(days) ? days : 90) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.get("/sales/columns", async (req, res, next) => {
+  try {
+    res.json({ columns: await listInventorySalesColumns(requireTenantId(req), String(req.query.connectionId ?? "")) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.post("/sales/columns", async (req, res, next) => {
+  try {
+    const input = salesColumnSchema.parse(req.body);
+    res.status(201).json({ column: await createInventorySalesColumn(requireTenantId(req), input.connectionId, input.name) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.put("/sales/columns/:columnId/values", async (req, res, next) => {
+  try {
+    const input = salesColumnValueSchema.parse(req.body);
+    const checked = await setInventorySalesColumnValue(requireTenantId(req), String(req.params.columnId ?? ""), input.saleId, input.checked);
+    if (checked === undefined) {
+      res.status(404).json({ error: "No encontramos la columna o la venta." });
+      return;
+    }
+    res.json({ checked });
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.delete("/sales/columns/:columnId", async (req, res, next) => {
+  try {
+    const deleted = await deleteInventorySalesColumn(requireTenantId(req), String(req.params.columnId ?? ""));
+    if (!deleted) {
+      res.status(404).json({ error: "No encontramos esa columna." });
+      return;
+    }
+    res.status(204).end();
   } catch (error) {
     next(error);
   }

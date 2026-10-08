@@ -108,6 +108,7 @@ export type InventoryActivity = {
 
 export type InventorySaleRecord = {
   id: string;
+  connectionId: string;
   title: string;
   asin?: string;
   sku?: string;
@@ -119,6 +120,14 @@ export type InventorySaleRecord = {
   orderDate: string;
   orderId: string;
   channel: string;
+};
+
+export type InventorySalesColumn = {
+  id: string;
+  connectionId: string;
+  name: string;
+  checkedSaleIds: string[];
+  createdAt: string;
 };
 
 export type InventoryReturnCase = {
@@ -315,6 +324,7 @@ type ActivityRow = {
 
 type SaleRecordRow = {
   id: string;
+  connection_id: string;
   title: string;
   asin: string | null;
   sku: string | null;
@@ -683,6 +693,27 @@ export async function initializeInventoryStore() {
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_amazon_order_lines_tenant_status_idx
       ON scanneraz_inventory_amazon_order_lines (tenant_id, sync_status, updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS scanneraz_inventory_sales_columns (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        connection_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (tenant_id, connection_id, name)
+      );
+
+      CREATE INDEX IF NOT EXISTS scanneraz_inventory_sales_columns_tenant_connection_idx
+      ON scanneraz_inventory_sales_columns (tenant_id, connection_id, created_at ASC);
+
+      CREATE TABLE IF NOT EXISTS scanneraz_inventory_sales_column_values (
+        column_id TEXT NOT NULL REFERENCES scanneraz_inventory_sales_columns(id) ON DELETE CASCADE,
+        sale_id TEXT NOT NULL REFERENCES scanneraz_inventory_amazon_order_lines(id) ON DELETE CASCADE,
+        tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
+        checked BOOLEAN NOT NULL DEFAULT FALSE,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (column_id, sale_id)
+      );
 
       CREATE TABLE IF NOT EXISTS scanneraz_inventory_amazon_sale_syncs (
         tenant_id TEXT NOT NULL REFERENCES scanneraz_tenants(id) ON DELETE CASCADE,
@@ -2488,6 +2519,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
     `
       SELECT
         lines.id,
+        lines.connection_id,
         COALESCE(products.title, lines.title, lines.seller_sku, lines.asin, 'Amazon sale') AS title,
         COALESCE(products.asin, lines.asin) AS asin,
         COALESCE(products.sku, lines.seller_sku) AS sku,
@@ -2521,6 +2553,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
 
     return {
       id: row.id,
+      connectionId: row.connection_id,
       title: row.title,
       ...(row.asin ? { asin: row.asin } : {}),
       ...(row.sku ? { sku: row.sku } : {}),
@@ -2534,6 +2567,87 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       channel: row.fulfilled_by?.toUpperCase() === "AMAZON" ? "Amazon FBA" : "Amazon FBM"
     } satisfies InventorySaleRecord;
   });
+}
+
+export async function listInventorySalesColumns(tenantId: string, connectionId: string): Promise<InventorySalesColumn[]> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{
+    id: string;
+    connection_id: string;
+    name: string;
+    created_at: Date | string;
+    checked_sale_ids: string[] | null;
+  }>(
+    `
+      SELECT columns.id, columns.connection_id, columns.name, columns.created_at,
+        COALESCE(array_agg(column_values.sale_id) FILTER (WHERE column_values.checked = TRUE), '{}') AS checked_sale_ids
+      FROM scanneraz_inventory_sales_columns AS columns
+      LEFT JOIN scanneraz_inventory_sales_column_values AS column_values
+        ON column_values.column_id = columns.id AND column_values.tenant_id = columns.tenant_id
+      WHERE columns.tenant_id = $1 AND columns.connection_id = $2
+      GROUP BY columns.id
+      ORDER BY columns.created_at ASC, columns.id ASC
+    `,
+    [tenantId, normalizeRequiredText(connectionId, "connectionId")]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    connectionId: row.connection_id,
+    name: row.name,
+    checkedSaleIds: row.checked_sale_ids ?? [],
+    createdAt: new Date(row.created_at).toISOString()
+  }));
+}
+
+export async function createInventorySalesColumn(tenantId: string, connectionId: string, name: string) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query<{ id: string; connection_id: string; name: string; created_at: Date | string }>(
+    `
+      INSERT INTO scanneraz_inventory_sales_columns (id, tenant_id, connection_id, name, created_at)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, connection_id, name, created_at
+    `,
+    [crypto.randomUUID(), tenantId, normalizeRequiredText(connectionId, "connectionId"), normalizeRequiredText(name, "name").slice(0, 80), new Date()]
+  );
+  const row = result.rows[0]!;
+  return { id: row.id, connectionId: row.connection_id, name: row.name, checkedSaleIds: [], createdAt: new Date(row.created_at).toISOString() } satisfies InventorySalesColumn;
+}
+
+export async function setInventorySalesColumnValue(
+  tenantId: string,
+  columnId: string,
+  saleId: string,
+  checked: boolean
+) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query(
+    `
+      INSERT INTO scanneraz_inventory_sales_column_values (column_id, sale_id, tenant_id, checked, updated_at)
+      SELECT columns.id, sales.id, $3, $4, $5
+      FROM scanneraz_inventory_sales_columns AS columns
+      JOIN scanneraz_inventory_amazon_order_lines AS sales
+        ON sales.id = $2 AND sales.tenant_id = columns.tenant_id AND sales.connection_id = columns.connection_id
+      WHERE columns.id = $1 AND columns.tenant_id = $3
+      ON CONFLICT (column_id, sale_id) DO UPDATE SET checked = EXCLUDED.checked, updated_at = EXCLUDED.updated_at
+      RETURNING checked
+    `,
+    [columnId, saleId, tenantId, checked, new Date()]
+  );
+  return result.rows[0] ? Boolean(result.rows[0].checked) : undefined;
+}
+
+export async function deleteInventorySalesColumn(tenantId: string, columnId: string) {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const result = await inventoryPool.query(
+    `DELETE FROM scanneraz_inventory_sales_columns WHERE id = $1 AND tenant_id = $2 RETURNING id`,
+    [columnId, tenantId]
+  );
+  return Boolean(result.rows[0]);
 }
 
 export function inventoryProductKey(input: Pick<InventoryInvoiceLineInput, "title" | "sku" | "asin" | "upc">) {
