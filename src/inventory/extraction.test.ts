@@ -99,3 +99,28 @@ test("uses a readable receipt barcode as the purchase reference when needed", ()
   assert.equal(draft.invoiceNumber, "TC-1610445422293821871");
   assert.equal(draft.invoiceReferenceLabel, "Código de barras");
 });
+
+test("groups repeated receipt lines with the same product and unit price", () => {
+  const draft = normalizeExtractedInvoiceDraft({
+    lines: [
+      { title: "Cinta de montaje", quantity: 1, upc: "012345678905", unitCostCents: 599 },
+      { title: "Cinta de montaje", quantity: 2, upc: "012345678905", unitCostCents: 599 }
+    ],
+    warnings: []
+  });
+
+  assert.equal(draft.lines.length, 1);
+  assert.equal(draft.lines[0]?.quantity, 3);
+});
+
+test("keeps repeated products separate when their prices differ", () => {
+  const draft = normalizeExtractedInvoiceDraft({
+    lines: [
+      { title: "Cinta de montaje", quantity: 1, upc: "012345678905", unitCostCents: 599 },
+      { title: "Cinta de montaje", quantity: 1, upc: "012345678905", unitCostCents: 699 }
+    ],
+    warnings: []
+  });
+
+  assert.equal(draft.lines.length, 2);
+});

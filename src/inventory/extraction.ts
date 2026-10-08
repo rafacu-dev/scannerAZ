@@ -221,6 +221,7 @@ export function buildInvoiceExtractionGatewayRequest(input: InvoiceDocumentInput
             "Only extract information visibly present in the document. Never invent a supplier, invoice number, UPC, ASIN, SKU, date, price, tax, discount, or totals.",
             "Use null for a scalar not visibly present. Use an empty lines array when no product line can be read reliably.",
             "All monetary amounts must be integer minor units (for USD, cents). Report discounts as positive amounts. Keep the exact product text where possible.",
+            "Group repeated purchases of the same product into one line when the product identifier or normalized title and the unit price are the same. Set quantity to the total units in that group. Keep separate lines when the same product has different unit prices, identifiers, or conditions.",
             "The invoiceNumber is critical for later retailer returns. Treat it as the purchase reference, not only a field literally named Invoice Number. Inspect the complete document, including the header, footer, number blocks, and text printed below a receipt barcode. For retail receipts, prefer an explicit Receipt, Transaction, TC#, ST#, TR#, Order, or Invoice reference. For example, `TC# 1610 4454 2229 3828 1871` must produce invoiceNumber `1610 4454 2229 3828 1871` and invoiceReferenceLabel `TC#`. Never use a product UPC, product SKU, masked card number, approval code, cashier number, or register number as invoiceNumber. If the barcode itself has a separately readable human-readable value, return it as invoiceBarcode; do not invent or guess a barcode value.",
             "For a retail receipt, an all-numeric product code of 8 to 14 digits is a UPC/GTIN: put it in upc, not sku.",
             "Invoice date must be YYYY-MM-DD when visible. Invoice time is optional and must preserve the text seen.",
@@ -538,6 +539,45 @@ export function normalizeExtractedInvoiceDraft(input: ExtractedInvoiceDraft): Ex
   const invoiceBarcode = optionalText(input.invoiceBarcode);
   const invoiceNumber = optionalText(input.invoiceNumber) ?? invoiceBarcode;
 
+  const normalizedLines = input.lines.map((line) => {
+    const sku = optionalText(line.sku);
+    const explicitUpc = normalizeReceiptUpc(line.upc);
+    const skuUpc = explicitUpc ? undefined : normalizeReceiptUpc(sku);
+
+    return {
+      title: line.title.trim(),
+      quantity: line.quantity,
+      sku: skuUpc ? undefined : sku,
+      upc: explicitUpc ?? skuUpc ?? optionalText(line.upc),
+      asin: optionalText(line.asin),
+      unitCostCents: line.unitCostCents,
+      lineTotalCents: line.lineTotalCents,
+      taxCents: line.taxCents,
+      discountCents: line.discountCents
+    };
+  });
+
+  const groupedLines = new Map<string, ExtractedInvoiceLine>();
+  for (const line of normalizedLines) {
+    const identifier = line.upc ?? line.asin ?? line.sku;
+    const productKey = identifier
+      ? identifier.toUpperCase()
+      : normalizeInvoiceTitle(line.title);
+    const priceKey = line.unitCostCents === undefined ? "unknown" : String(line.unitCostCents);
+    const key = `${productKey}|${priceKey}`;
+    const existing = groupedLines.get(key);
+
+    if (!existing) {
+      groupedLines.set(key, { ...line });
+      continue;
+    }
+
+    existing.quantity += line.quantity;
+    existing.lineTotalCents = sumOptionalCents(existing.lineTotalCents, line.lineTotalCents);
+    existing.taxCents = sumOptionalCents(existing.taxCents, line.taxCents);
+    existing.discountCents = sumOptionalCents(existing.discountCents, line.discountCents);
+  }
+
   return {
     supplier: optionalText(input.supplier),
     invoiceNumber,
@@ -552,25 +592,21 @@ export function normalizeExtractedInvoiceDraft(input: ExtractedInvoiceDraft): Ex
     shippingCents: input.shippingCents,
     otherChargesCents: input.otherChargesCents,
     totalCents: input.totalCents,
-    lines: input.lines.map((line) => {
-      const sku = optionalText(line.sku);
-      const explicitUpc = normalizeReceiptUpc(line.upc);
-      const skuUpc = explicitUpc ? undefined : normalizeReceiptUpc(sku);
-
-      return {
-        title: line.title.trim(),
-        quantity: line.quantity,
-        sku: skuUpc ? undefined : sku,
-        upc: explicitUpc ?? skuUpc ?? optionalText(line.upc),
-        asin: optionalText(line.asin),
-        unitCostCents: line.unitCostCents,
-        lineTotalCents: line.lineTotalCents,
-        taxCents: line.taxCents,
-        discountCents: line.discountCents
-      };
-    }),
+    lines: [...groupedLines.values()],
     warnings: [...new Set(input.warnings.map((warning) => warning.trim()).filter(Boolean))]
   };
+}
+
+function normalizeInvoiceTitle(value: string) {
+  return value.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+}
+
+function sumOptionalCents(left?: number, right?: number) {
+  if (left === undefined || right === undefined) {
+    return left ?? right;
+  }
+
+  return left + right;
 }
 
 function optionalText(value?: string | null) {
