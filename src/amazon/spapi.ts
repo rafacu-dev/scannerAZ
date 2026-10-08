@@ -151,6 +151,8 @@ export type AmazonFulfilledOrderLine = {
   conditionType?: string;
   quantityOrdered: number;
   quantityFulfilled: number;
+  /** Retail price per unit when the Orders API returns proceeds data. */
+  unitPrice?: number;
   fulfillmentStatus?: string;
   fulfilledBy?: string;
   createdAt?: string;
@@ -222,7 +224,8 @@ export function buildAmazonOrdersSearchUrl(input: {
   url.searchParams.set("marketplaceIds", input.marketplaceId ?? config.AMAZON_MARKETPLACE_ID);
   url.searchParams.set("lastUpdatedAfter", input.lastUpdatedAfter);
   url.searchParams.set("maxResultsPerPage", String(Math.max(1, Math.min(input.maxResultsPerPage ?? 100, 100))));
-  url.searchParams.set("includedData", "FULFILLMENT");
+  // Proceeds exposes the unit price without requesting buyer or recipient PII.
+  url.searchParams.set("includedData", "FULFILLMENT,PROCEEDS");
 
   if (input.paginationToken) {
     url.searchParams.set("paginationToken", input.paginationToken);
@@ -1171,6 +1174,8 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
       const asin = stringValue(product?.asin)?.toUpperCase();
       const title = stringValue(product?.title);
       const conditionType = stringValue(asRecord(product?.condition)?.conditionType);
+      const unitPrice = numericValue(asRecord(asRecord(product?.price)?.unitPrice)?.amount) ??
+        itemUnitPriceFromProceeds(item);
       const quantityOrdered = nonNegativeNumericValue(item.quantityOrdered) ?? 0;
       const explicitFulfilled = nonNegativeNumericValue(itemFulfillment?.quantityFulfilled);
       const quantityFulfilled = explicitFulfilled ?? (
@@ -1186,6 +1191,7 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
         orderItemId,
         quantityOrdered,
         quantityFulfilled: Math.min(quantityOrdered, quantityFulfilled),
+        ...(unitPrice !== undefined ? { unitPrice } : {}),
         ...(sellerSku ? { sellerSku } : {}),
         ...(asin ? { asin } : {}),
         ...(title ? { title } : {}),
@@ -1203,6 +1209,15 @@ export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse)
     lines: orders,
     nextPageToken: stringValue(pagination?.nextToken)
   };
+}
+
+function itemUnitPriceFromProceeds(item: Record<string, unknown>) {
+  const proceeds = asRecord(item.proceeds);
+  const breakdowns = recordArray(proceeds?.breakdowns);
+  const itemBreakdown = breakdowns.find((breakdown) => stringValue(asRecord(breakdown)?.type)?.toUpperCase() === "ITEM");
+  const amount = numericValue(asRecord(asRecord(itemBreakdown)?.subtotal)?.amount);
+  const quantity = nonNegativeNumericValue(item.quantityOrdered);
+  return amount !== undefined && quantity && quantity > 0 ? amount / quantity : undefined;
 }
 
 export async function getSellerListingItem(input: {

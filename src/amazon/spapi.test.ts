@@ -47,7 +47,7 @@ test("keeps the original filters when continuing an Amazon Orders page", () => {
   assert.equal(url.searchParams.get("marketplaceIds"), "ATVPDKIKX0DER");
   assert.equal(url.searchParams.get("lastUpdatedAfter"), "2026-09-01T00:00:00.000Z");
   assert.equal(url.searchParams.get("maxResultsPerPage"), "100");
-  assert.equal(url.searchParams.get("includedData"), "FULFILLMENT");
+  assert.equal(url.searchParams.get("includedData"), "FULFILLMENT,PROCEEDS");
   assert.equal(url.searchParams.get("paginationToken"), "next-page-token");
 });
 

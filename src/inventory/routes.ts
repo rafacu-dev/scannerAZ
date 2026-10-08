@@ -26,6 +26,7 @@ import {
   findInvoiceExtractionByDocumentHash,
   getAmazonSalesSyncState,
   getInventoryOverview,
+  listInventorySales,
   listInventoryInvoices,
   getInventoryInvoice,
   deleteInventoryInvoice,
@@ -183,6 +184,15 @@ inventoryRouter.get("/overview", async (req, res, next) => {
     const tenantId = requireTenantId(req);
     const overview = await getInventoryOverview(tenantId);
     res.json(await attachMissingProductImages(tenantId, overview));
+  } catch (error) {
+    next(error);
+  }
+});
+
+inventoryRouter.get("/sales", async (req, res, next) => {
+  try {
+    const days = Number(req.query.days ?? 90);
+    res.json({ sales: await listInventorySales(requireTenantId(req), Number.isFinite(days) ? days : 90) });
   } catch (error) {
     next(error);
   }

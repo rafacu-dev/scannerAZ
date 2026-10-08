@@ -106,6 +106,20 @@ export type InventoryActivity = {
   occurredAt: string;
 };
 
+export type InventorySaleRecord = {
+  id: string;
+  title: string;
+  asin?: string;
+  sku?: string;
+  imageUrl?: string;
+  quantity: number;
+  unitPriceCents?: number;
+  status: "shipped" | "pending" | "canceled";
+  orderDate: string;
+  orderId: string;
+  channel: string;
+};
+
 export type InventoryReturnCase = {
   id: string;
   productId: string;
@@ -153,6 +167,7 @@ export type AmazonInventorySalesLine = {
   conditionType?: string;
   quantityOrdered: number;
   quantityFulfilled: number;
+  unitPrice?: number;
   fulfillmentStatus?: string;
   fulfilledBy?: string;
   createdAt?: string;
@@ -294,6 +309,20 @@ type ActivityRow = {
   reference: string | null;
   notes: string | null;
   occurred_at: Date | string;
+};
+
+type SaleRecordRow = {
+  id: string;
+  title: string;
+  asin: string | null;
+  sku: string | null;
+  image_url: string | null;
+  quantity_ordered: string | number;
+  unit_price_cents: string | number | null;
+  fulfillment_status: string | null;
+  order_created_at: Date | string | null;
+  amazon_order_id: string;
+  fulfilled_by: string | null;
 };
 
 type ReturnRow = {
@@ -632,6 +661,7 @@ export async function initializeInventoryStore() {
         applied_quantity INTEGER NOT NULL DEFAULT 0 CHECK (applied_quantity >= 0),
         fulfillment_status TEXT,
         fulfilled_by TEXT,
+        unit_price_cents INTEGER,
         order_created_at TIMESTAMPTZ,
         order_last_updated_at TIMESTAMPTZ,
         sync_status TEXT NOT NULL CHECK (sync_status IN ('applied', 'unmatched_product', 'insufficient_stock', 'not_fulfilled')),
@@ -640,6 +670,9 @@ export async function initializeInventoryStore() {
         updated_at TIMESTAMPTZ NOT NULL,
         UNIQUE (tenant_id, connection_id, amazon_order_id, amazon_order_item_id)
       );
+
+      ALTER TABLE scanneraz_inventory_amazon_order_lines
+        ADD COLUMN IF NOT EXISTS unit_price_cents INTEGER;
 
       CREATE INDEX IF NOT EXISTS scanneraz_inventory_amazon_order_lines_tenant_status_idx
       ON scanneraz_inventory_amazon_order_lines (tenant_id, sync_status, updated_at DESC);
@@ -2049,6 +2082,7 @@ function normalizeAmazonSalesLine(input: AmazonInventorySalesLine) {
     sellerSku: normalizeCode(input.sellerSku)?.slice(0, 200),
     asin: normalizeCode(input.asin)?.slice(0, 40),
     title: normalizeOptionalText(input.title)?.slice(0, 500),
+    unitPriceCents: input.unitPrice === undefined ? undefined : Math.round(input.unitPrice * 100),
     condition: inventoryConditionFromAmazon(input.conditionType),
     quantityOrdered,
     quantityFulfilled,
@@ -2084,10 +2118,10 @@ async function upsertAmazonSalesLine(
     `
       INSERT INTO scanneraz_inventory_amazon_order_lines (
         id, tenant_id, connection_id, amazon_order_id, amazon_order_item_id, seller_sku, asin, title,
-        condition, quantity_ordered, desired_quantity, fulfillment_status, fulfilled_by,
+        condition, quantity_ordered, desired_quantity, fulfillment_status, fulfilled_by, unit_price_cents,
         order_created_at, order_last_updated_at, sync_status, created_at, updated_at
       ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $17
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $18
       )
       ON CONFLICT (tenant_id, connection_id, amazon_order_id, amazon_order_item_id) DO UPDATE SET
         seller_sku = EXCLUDED.seller_sku,
@@ -2098,6 +2132,7 @@ async function upsertAmazonSalesLine(
         desired_quantity = EXCLUDED.desired_quantity,
         fulfillment_status = EXCLUDED.fulfillment_status,
         fulfilled_by = EXCLUDED.fulfilled_by,
+        unit_price_cents = EXCLUDED.unit_price_cents,
         order_created_at = EXCLUDED.order_created_at,
         order_last_updated_at = EXCLUDED.order_last_updated_at,
         updated_at = EXCLUDED.updated_at
@@ -2117,6 +2152,7 @@ async function upsertAmazonSalesLine(
       line.quantityFulfilled,
       line.fulfillmentStatus ?? null,
       line.fulfilledBy ?? null,
+      line.unitPriceCents ?? null,
       line.createdAt ?? null,
       line.lastUpdatedAt ?? null,
       line.quantityFulfilled === 0 ? "not_fulfilled" : "unmatched_product",
@@ -2431,6 +2467,60 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
     recentActivity: activityResult.rows.map(toInventoryActivity),
     returns
   };
+}
+
+export async function listInventorySales(tenantId: string, days = 90): Promise<InventorySaleRecord[]> {
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  const boundedDays = Math.max(1, Math.min(Math.floor(days), 365));
+  const result = await inventoryPool.query<SaleRecordRow>(
+    `
+      SELECT
+        lines.id,
+        COALESCE(products.title, lines.title, lines.seller_sku, lines.asin, 'Amazon sale') AS title,
+        COALESCE(products.asin, lines.asin) AS asin,
+        COALESCE(products.sku, lines.seller_sku) AS sku,
+        products.image_url,
+        lines.quantity_ordered,
+        lines.unit_price_cents,
+        lines.fulfillment_status,
+        lines.order_created_at,
+        lines.amazon_order_id,
+        lines.fulfilled_by
+      FROM scanneraz_inventory_amazon_order_lines AS lines
+      LEFT JOIN scanneraz_inventory_products AS products
+        ON products.id = lines.product_id AND products.tenant_id = lines.tenant_id
+      WHERE lines.tenant_id = $1
+        AND COALESCE(lines.order_created_at, lines.updated_at) >= NOW() - ($2::integer * INTERVAL '1 day')
+      ORDER BY COALESCE(lines.order_created_at, lines.updated_at) DESC, lines.created_at DESC
+      LIMIT 2000
+    `,
+    [tenantId, boundedDays]
+  );
+
+  return result.rows.map((row) => {
+    const fulfillmentStatus = row.fulfillment_status?.toUpperCase() ?? "";
+    const status: InventorySaleRecord["status"] = /CANCEL|UNFULFILLABLE/.test(fulfillmentStatus)
+      ? "canceled"
+      : /SHIPPED|PARTIALLY_SHIPPED/.test(fulfillmentStatus)
+        ? "shipped"
+        : "pending";
+    const orderDate = row.order_created_at ? new Date(row.order_created_at).toISOString() : new Date().toISOString();
+
+    return {
+      id: row.id,
+      title: row.title,
+      ...(row.asin ? { asin: row.asin } : {}),
+      ...(row.sku ? { sku: row.sku } : {}),
+      ...(row.image_url ? { imageUrl: row.image_url } : {}),
+      quantity: numberValue(row.quantity_ordered),
+      ...(row.unit_price_cents === null ? {} : { unitPriceCents: numberValue(row.unit_price_cents) }),
+      status,
+      orderDate,
+      orderId: row.amazon_order_id,
+      channel: row.fulfilled_by?.toUpperCase() === "AMAZON" ? "Amazon FBA" : "Amazon FBM"
+    } satisfies InventorySaleRecord;
+  });
 }
 
 export function inventoryProductKey(input: Pick<InventoryInvoiceLineInput, "title" | "sku" | "asin" | "upc">) {
