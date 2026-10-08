@@ -2603,9 +2603,11 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
 
   return result.rows.map((row) => {
     const fulfillmentStatus = row.fulfillment_status?.toUpperCase() ?? "";
+    // Only a fully shipped order is a completed sale. Unshipped, pending and
+    // partially shipped orders keep their unfulfilled units pending.
     const status: InventorySaleRecord["status"] = /CANCEL|UNFULFILLABLE/.test(fulfillmentStatus)
       ? "canceled"
-      : /SHIPPED|PARTIALLY_SHIPPED/.test(fulfillmentStatus)
+      : fulfillmentStatus === "SHIPPED"
         ? "shipped"
         : "pending";
     const orderDate = row.order_created_at ? new Date(row.order_created_at).toISOString() : new Date().toISOString();
@@ -2620,7 +2622,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       ...(row.sku ? { sku: row.sku } : {}),
       ...(row.image_url ? { imageUrl: row.image_url } : {}),
       quantity: fulfilledQuantity,
-      pendingQuantity: status === "canceled" ? 0 : Math.max(0, quantityOrdered - fulfilledQuantity),
+      pendingQuantity: status === "canceled" || status === "shipped" ? 0 : Math.max(0, quantityOrdered - fulfilledQuantity),
       ...(row.unit_price_cents === null ? {} : { unitPriceCents: numberValue(row.unit_price_cents) }),
       ...(row.pickup === null ? {} : { pickup: row.pickup }),
       status,
