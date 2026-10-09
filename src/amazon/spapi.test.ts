@@ -16,10 +16,19 @@ import {
   normalizeAmazonItemOffersBatch,
   normalizeCatalogSearchResponse,
   normalizeAmazonOrderSearch,
+  normalizeAmazonOrderStates,
   normalizePricingListings,
   prepareListingPriceUpdate,
   prepareListingRestock
 } from "./spapi.js";
+
+test("retains canceled order states even when Amazon omits order items", () => {
+  const response = { orders: [{ orderId: "order-1", lastUpdatedTime: "2026-10-09T12:00:00Z",
+    fulfillment: { fulfillmentStatus: "CANCELED" }, orderItems: [] }] };
+  assert.equal(normalizeAmazonOrderSearch(response).lines.length, 0);
+  assert.deepEqual(normalizeAmazonOrderStates(response), [{ orderId: "order-1",
+    fulfillmentStatus: "CANCELED", lastUpdatedAt: "2026-10-09T12:00:00.000Z" }]);
+});
 
 test("uses the North America sandbox endpoint when requested", () => {
   assert.equal(

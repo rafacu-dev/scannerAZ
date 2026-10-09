@@ -1771,6 +1771,7 @@ export async function beginAmazonSalesSync(
     const pendingStartedAt = current?.window_started_at ? new Date(current.window_started_at) : undefined;
     const pendingAfter = current?.window_after ? new Date(current.window_after) : undefined;
     const canContinue = Boolean(
+      !forceRefresh &&
       pendingToken &&
       pendingStartedAt &&
       pendingAfter &&
@@ -2568,6 +2569,30 @@ export async function getInventoryOverview(tenantId: string): Promise<InventoryO
     recentActivity: activityResult.rows.map(toInventoryActivity),
     returns
   };
+}
+
+export async function refreshPendingAmazonOrderStates(
+  tenantId: string,
+  orders: Array<{ orderId: string; fulfillmentStatus: string; lastUpdatedAt?: string }>
+) {
+  if (!orders.length) return;
+  const inventoryPool = requirePool();
+  await initializeInventoryStore();
+  // Pending orders may disappear from item normalization when Amazon returns
+  // a cancellation without orderItems. Apply order-level states to those rows.
+  await inventoryPool.query(`
+    UPDATE scanneraz_inventory_amazon_order_lines AS lines
+    SET fulfillment_status = incoming.fulfillment_status,
+        order_last_updated_at = COALESCE(incoming.updated_at, lines.order_last_updated_at),
+        updated_at = NOW()
+    FROM UNNEST($2::text[], $3::text[], $4::timestamptz[])
+      AS incoming(order_id, fulfillment_status, updated_at)
+    WHERE lines.tenant_id = $1 AND lines.amazon_order_id = incoming.order_id
+      AND UPPER(lines.fulfillment_status) IN ('PENDING', 'PENDING_AVAILABILITY')
+      AND (lines.order_last_updated_at IS NULL OR incoming.updated_at IS NULL
+        OR incoming.updated_at >= lines.order_last_updated_at)
+  `, [tenantId, orders.map(order => order.orderId), orders.map(order => order.fulfillmentStatus),
+    orders.map(order => order.lastUpdatedAt ?? null)]);
 }
 
 export async function listInventorySales(tenantId: string, days = 90): Promise<InventorySaleRecord[]> {

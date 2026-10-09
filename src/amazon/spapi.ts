@@ -1153,6 +1153,16 @@ export async function searchSellerOrders(input: {
  * quantity is zero; a later order-state update can then reverse an earlier
  * inventory movement safely.
  */
+export function normalizeAmazonOrderStates(response: AmazonOrdersSearchResponse) {
+  return (response.orders ?? []).flatMap((rawOrder) => {
+    const order = asRecord(rawOrder);
+    const orderId = stringValue(order?.orderId);
+    const fulfillmentStatus = stringValue(asRecord(order?.fulfillment)?.fulfillmentStatus)?.toUpperCase();
+    if (!orderId || !fulfillmentStatus) return [];
+    return [{ orderId, fulfillmentStatus, lastUpdatedAt: isoDateValue(order?.lastUpdatedTime) }];
+  });
+}
+
 export function normalizeAmazonOrderSearch(response: AmazonOrdersSearchResponse): AmazonOrderSearchPage {
   const orders = (response.orders ?? []).flatMap((rawOrder) => {
     const order = asRecord(rawOrder);

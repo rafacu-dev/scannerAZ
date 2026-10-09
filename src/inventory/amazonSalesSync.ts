@@ -2,6 +2,7 @@ import { config } from "../config.js";
 import {
   getLwaAccessToken,
   normalizeAmazonOrderSearch,
+  normalizeAmazonOrderStates,
   searchSellerOrders
 } from "../amazon/spapi.js";
 import { getAmazonConnectionForTenant, listAmazonConnections } from "../storage/connections.js";
@@ -11,6 +12,7 @@ import {
   completeAmazonSalesSync,
   failAmazonSalesSync,
   importAmazonSalesLines,
+  refreshPendingAmazonOrderStates,
 } from "./store.js";
 
 /**
@@ -56,6 +58,7 @@ export async function syncAmazonSalesForConnection(input: {
         maxResultsPerPage: 100
       });
       const page = normalizeAmazonOrderSearch(response);
+      await refreshPendingAmazonOrderStates(input.tenantId, normalizeAmazonOrderStates(response));
       const imported = await importAmazonSalesLines(input.tenantId, input.connectionId, page.lines);
 
       totals.processedLines += imported.processedLines;
