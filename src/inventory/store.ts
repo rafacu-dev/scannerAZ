@@ -2153,9 +2153,14 @@ function normalizeAmazonSalesLine(input: AmazonInventorySalesLine) {
   const orderItemId = normalizeRequiredText(input.orderItemId, "amazon order item id").slice(0, 200);
   const quantityOrdered = positiveInteger(Math.floor(input.quantityOrdered), "quantityOrdered");
   const fulfillmentStatus = normalizeOptionalText(input.fulfillmentStatus)?.toUpperCase().slice(0, 80);
-  // Pending/unshipped orders can still be canceled and must not consume stock.
-  // Only Amazon's confirmed fulfillment states represent a completed sale.
-  const confirmed = Boolean(fulfillmentStatus && /^(SHIPPED|PARTIALLY_SHIPPED)$/.test(fulfillmentStatus));
+  // Amazon may leave fulfillment_status as PENDING after the carrier has
+  // accepted the package. Shipping states beyond pending pickup are already
+  // confirmed sales and must contribute their fulfilled units.
+  const shippingStatus = input.shippingStatus?.toLowerCase();
+  const shippingConfirmed = shippingStatus === "picked_up" ||
+    shippingStatus === "out_for_delivery" ||
+    shippingStatus === "delivered";
+  const confirmed = shippingConfirmed || Boolean(fulfillmentStatus && /^(SHIPPED|PARTIALLY_SHIPPED)$/.test(fulfillmentStatus));
   const quantityFulfilled = confirmed && !isCanceledAmazonFulfillment(fulfillmentStatus)
     ? Math.min(
       quantityOrdered,
