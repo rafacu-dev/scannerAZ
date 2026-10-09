@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { config } from "../config.js";
+import { classifyAmazonSale } from "./salesStatus.js";
 import { normalizeExtractedInvoiceDraft, type ExtractedInvoiceDraft } from "./extraction.js";
 
 export type InventoryCondition =
@@ -119,7 +120,7 @@ export type InventorySaleRecord = {
   pickup?: boolean;
   shippingStatus?: "pending_pickup" | "picked_up" | "out_for_delivery" | "delivered";
   fulfillmentStatus?: string;
-  status: "shipped" | "pending" | "canceled";
+  status: "shipped" | "confirmed" | "pending" | "canceled" | "unknown";
   orderDate: string;
   orderId: string;
   channel: string;
@@ -2620,21 +2621,15 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
 
   return result.rows.map((row) => {
     const fulfillmentStatus = row.fulfillment_status?.toUpperCase() ?? "";
-    // Amazon can keep fulfillment_status as PENDING after the carrier has
-    // accepted the package. Once shipping has advanced beyond pending pickup,
-    // treat the sale as confirmed and include it in the daily sales totals.
-    const shippingStatus = row.shipping_status?.toLowerCase();
-    const shippingConfirmed = shippingStatus === "picked_up" ||
-      shippingStatus === "out_for_delivery" ||
-      shippingStatus === "delivered";
-    const status: InventorySaleRecord["status"] = /CANCEL|UNFULFILLABLE/.test(fulfillmentStatus)
-      ? "canceled"
-      : fulfillmentStatus === "SHIPPED" || shippingConfirmed
-        ? "shipped"
-        : "pending";
+    const classification = classifyAmazonSale(fulfillmentStatus);
+    const status: InventorySaleRecord["status"] = fulfillmentStatus === "SHIPPED"
+      ? "shipped"
+      : classification;
     const orderDate = row.order_created_at ? new Date(row.order_created_at).toISOString() : new Date().toISOString();
     const quantityOrdered = numberValue(row.quantity_ordered);
-    const fulfilledQuantity = status === "canceled" ? 0 : Math.min(quantityOrdered, Math.max(0, numberValue(row.desired_quantity)));
+    // Sales units are ordered units after payment confirmation, independently
+    // of the fulfilled units used for inventory movements.
+    const soldQuantity = classification === "confirmed" ? quantityOrdered : 0;
 
     return {
       id: row.id,
@@ -2643,8 +2638,8 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       ...(row.asin ? { asin: row.asin } : {}),
       ...(row.sku ? { sku: row.sku } : {}),
       ...(row.image_url ? { imageUrl: row.image_url } : {}),
-      quantity: fulfilledQuantity,
-      pendingQuantity: status === "canceled" || status === "shipped" ? 0 : Math.max(0, quantityOrdered - fulfilledQuantity),
+      quantity: soldQuantity,
+      pendingQuantity: classification === "pending" ? quantityOrdered : 0,
       ...(row.unit_price_cents === null ? {} : { unitPriceCents: numberValue(row.unit_price_cents) }),
       ...(row.pickup === null ? {} : { pickup: row.pickup }),
       ...(row.shipping_status ? { shippingStatus: row.shipping_status as InventorySaleRecord["shippingStatus"] } : {}),
