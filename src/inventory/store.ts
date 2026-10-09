@@ -2615,11 +2615,16 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
 
   return result.rows.map((row) => {
     const fulfillmentStatus = row.fulfillment_status?.toUpperCase() ?? "";
-    // Only a fully shipped order is a completed sale. Unshipped, pending and
-    // partially shipped orders keep their unfulfilled units pending.
+    // Amazon can keep fulfillment_status as PENDING after the carrier has
+    // accepted the package. Once shipping has advanced beyond pending pickup,
+    // treat the sale as confirmed and include it in the daily sales totals.
+    const shippingStatus = row.shipping_status?.toLowerCase();
+    const shippingConfirmed = shippingStatus === "picked_up" ||
+      shippingStatus === "out_for_delivery" ||
+      shippingStatus === "delivered";
     const status: InventorySaleRecord["status"] = /CANCEL|UNFULFILLABLE/.test(fulfillmentStatus)
       ? "canceled"
-      : fulfillmentStatus === "SHIPPED"
+      : fulfillmentStatus === "SHIPPED" || shippingConfirmed
         ? "shipped"
         : "pending";
     const orderDate = row.order_created_at ? new Date(row.order_created_at).toISOString() : new Date().toISOString();
