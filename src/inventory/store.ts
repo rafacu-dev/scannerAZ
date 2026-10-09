@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { config } from "../config.js";
 import { classifyAmazonSale } from "./salesStatus.js";
+import { fillSaleImages } from "./salesImages.js";
 import { normalizeExtractedInvoiceDraft, type ExtractedInvoiceDraft } from "./extraction.js";
 
 export type InventoryCondition =
@@ -2616,12 +2617,21 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
         COALESCE(lines.title, products.title, lines.seller_sku, lines.asin, 'Amazon sale') AS title,
         COALESCE(products.asin, lines.asin) AS asin,
         COALESCE(products.sku, lines.seller_sku) AS sku,
-        COALESCE(products.image_url, (
-          SELECT mappings.image_url
+        COALESCE(NULLIF(BTRIM(products.image_url), ''), (
+          SELECT NULLIF(BTRIM(mappings.image_url), '')
           FROM scanneraz_inventory_asin_mappings AS mappings
           WHERE mappings.tenant_id = lines.tenant_id
             AND mappings.asin = lines.asin
-            AND mappings.image_url IS NOT NULL
+            AND NULLIF(BTRIM(mappings.image_url), '') IS NOT NULL
+          ORDER BY mappings.updated_at DESC, mappings.upc
+          LIMIT 1
+        ), (
+          SELECT NULLIF(BTRIM(candidate.image_url), '')
+          FROM scanneraz_inventory_products AS candidate
+          WHERE candidate.tenant_id = lines.tenant_id
+            AND candidate.asin = COALESCE(NULLIF(lines.asin, ''), products.asin)
+            AND NULLIF(BTRIM(candidate.image_url), '') IS NOT NULL
+          ORDER BY candidate.updated_at DESC, candidate.id
           LIMIT 1
         )) AS image_url,
         lines.quantity_ordered,
@@ -2644,7 +2654,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
     [tenantId, boundedDays]
   );
 
-  return result.rows.map((row) => {
+  return fillSaleImages(result.rows.map((row) => {
     const fulfillmentStatus = row.fulfillment_status?.toUpperCase() ?? "";
     const classification = classifyAmazonSale(fulfillmentStatus);
     const status: InventorySaleRecord["status"] = fulfillmentStatus === "SHIPPED"
@@ -2674,7 +2684,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       orderId: row.amazon_order_id,
       channel: row.fulfilled_by?.toUpperCase() === "AMAZON" ? "Amazon FBA" : "Amazon FBM"
     } satisfies InventorySaleRecord;
-  });
+  }));
 }
 
 export async function listInventorySalesColumns(tenantId: string): Promise<InventorySalesColumn[]> {
