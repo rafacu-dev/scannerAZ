@@ -368,7 +368,7 @@ app.all("/jobs/repricing/run", (req, res) => {
 
 app.use("/api/keepa", keepaRouter);
 app.use("/api/amazon", markSensitiveResponse, apiRateLimit, requireOperatorAccess, amazonRouter);
-app.use("/api/public", markSensitiveResponse, requirePublicAppAccess, appStoreReviewRouter);
+app.use("/api/public", markSensitiveResponse, requirePublicAppAccess, requireTenantSession, appStoreReviewRouter);
 app.use(
   "/api/public/amazon",
   markSensitiveResponse,
