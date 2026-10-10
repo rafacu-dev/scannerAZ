@@ -500,7 +500,7 @@ app.post("/auth/scanneraz/email-code/verify", requirePublicAppAccess, emailCodeR
     const session = await signInWithEmailCode({
       email: String(req.body?.email ?? ""),
       code: String(req.body?.code ?? ""),
-      allowSignup: intent === "signup"
+      allowSignup: intent === "signup" || isAppStoreReviewAccount
     });
     sendSession(res, session, session.isNewAccount ? 201 : 200, { isNewAccount: session.isNewAccount });
   } catch (error) {
