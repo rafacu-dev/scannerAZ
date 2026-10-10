@@ -15,7 +15,7 @@ const prices = [96.99, 79.5, 97];
 const competitorPrices = [95.99, 78.5, 96.5];
 const imageUrl = (req: express.Request, path: string) => {
   const host = req.get("x-forwarded-host")?.split(",")[0]?.trim() || req.get("host");
-  return `${req.protocol}://${host}${path}`;
+  return `${req.protocol}://${host}${path}?v=20261010`;
 };
 const demoProducts = (req: express.Request) => products.map((product) => ({
   ...product,

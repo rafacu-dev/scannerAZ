@@ -30,7 +30,7 @@ test("review account receives complete product offers without reaching live Amaz
     assert.equal(listingsResponse.status, 200);
     const listings = await listingsResponse.json() as { listings: Array<{ asin: string; imageUrl: string }> };
     assert.equal(listings.listings.length, 3);
-    assert.equal(listings.listings[0].imageUrl, "http://scanneraz.warasoft.com/demo/stand-mixer.jpg");
+    assert.equal(listings.listings[0].imageUrl, "http://scanneraz.warasoft.com/demo/stand-mixer.jpg?v=20261010");
 
     const offersResponse = await fetch(`${base}/amazon/connections/app-store-review-connection/listings/pricing/offers`, {
       method: "POST",
