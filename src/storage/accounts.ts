@@ -34,6 +34,8 @@ const emailCodeLifetimeMs = 10 * 60 * 1000;
 const emailCodeMaxAttempts = 5;
 const emailCodesPerWindow = 5;
 const emailCodeWindowMs = 15 * 60 * 1000;
+export const APP_STORE_REVIEW_EMAIL = "test@warasoft.com";
+export const APP_STORE_REVIEW_CODE = "111111";
 
 export type NewAccountSession = TenantSession & {
   accessToken: string;
@@ -506,7 +508,9 @@ export async function createEmailSignInCode(rawEmail: string) {
     throw new TooManyEmailCodesError();
   }
 
-  const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+  const code = email === APP_STORE_REVIEW_EMAIL
+    ? APP_STORE_REVIEW_CODE
+    : crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
   const now = new Date();
 
   // A new code replaces any earlier one for this email.

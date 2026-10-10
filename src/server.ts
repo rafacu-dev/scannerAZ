@@ -48,6 +48,7 @@ import {
 import {
   AccountAlreadyExistsError,
   AccountNotFoundError,
+  APP_STORE_REVIEW_EMAIL,
   changeAccountPassword,
   createEmailSignInCode,
   deleteAccountForUser,
@@ -78,6 +79,7 @@ import { keepaRouter } from "./keepa/routes.js";
 import { retailRouter } from "./retail/routes.js";
 import "./retail/target/clearance.js";
 import { targetRouter } from "./retail/target/routes.js";
+import { appStoreReviewRouter } from "./demo/appStoreReview.js";
 
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -366,6 +368,7 @@ app.all("/jobs/repricing/run", (req, res) => {
 
 app.use("/api/keepa", keepaRouter);
 app.use("/api/amazon", markSensitiveResponse, apiRateLimit, requireOperatorAccess, amazonRouter);
+app.use("/api/public", markSensitiveResponse, requirePublicAppAccess, appStoreReviewRouter);
 app.use(
   "/api/public/amazon",
   markSensitiveResponse,
@@ -437,14 +440,19 @@ app.post("/auth/scanneraz/email-code", requirePublicAppAccess, emailCodeRateLimi
   let email = "";
 
   try {
-    if (!isEmailConfigured()) {
+    email = String(req.body?.email ?? "").trim().toLowerCase();
+    const isAppStoreReviewAccount = email === APP_STORE_REVIEW_EMAIL;
+
+    if (!isEmailConfigured() && !isAppStoreReviewAccount) {
       throw new EmailUnavailableError();
     }
 
-    const created = await createEmailSignInCode(String(req.body?.email ?? ""));
+    const created = await createEmailSignInCode(email);
     email = created.email;
     const { code, expiresInSeconds } = created;
-    await sendSignInCodeEmail(email, code, emailLocaleFrom(req.body?.locale));
+    if (!isAppStoreReviewAccount) {
+      await sendSignInCodeEmail(email, code, emailLocaleFrom(req.body?.locale));
+    }
     res.setHeader("cache-control", "no-store");
     res.status(202).json({ sent: true, expiresInSeconds });
   } catch (error) {
@@ -481,7 +489,10 @@ app.post("/auth/scanneraz/email-code/verify", requirePublicAppAccess, emailCodeR
   try {
     const intent = req.body?.intent === "signup" ? "signup" : "login";
 
-    if (intent === "signup" && !config.SCANNERAZ_PUBLIC_SIGNUP_ENABLED) {
+    const requestedEmail = String(req.body?.email ?? "").trim().toLowerCase();
+    const isAppStoreReviewAccount = requestedEmail === APP_STORE_REVIEW_EMAIL;
+
+    if (intent === "signup" && !config.SCANNERAZ_PUBLIC_SIGNUP_ENABLED && !isAppStoreReviewAccount) {
       res.status(503).json({ error: "ScannerAz public registration is not enabled yet.", code: "signup_disabled" });
       return;
     }
