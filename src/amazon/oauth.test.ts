@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-process.env.APP_BASE_URL = "https://scanneraz.warasoft.com";
+process.env.APP_BASE_URL = "https://warasoft.com/seller-ai/";
 process.env.AMAZON_REGION = "na";
 process.env.AMAZON_SP_API_APP_ID = "amzn1.sellerapps.app.scanneraz-test";
 process.env.ENCRYPTION_KEY = "e".repeat(32);

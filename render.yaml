@@ -44,7 +44,7 @@ services:
     envVars:
       - fromGroup: scanneraz-production-runtime
       - key: APP_BASE_URL
-        value: https://scanneraz.warasoft.com
+        value: https://warasoft.com/seller-ai/
       - key: DATABASE_URL
         fromDatabase:
           name: scanneraz-db

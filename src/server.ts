@@ -347,7 +347,7 @@ app.use(requireTrustedEdge);
 app.use(express.static(publicDir));
 
 app.get("/", (_req, res) => {
-  res.redirect(302, "/scanneraz/");
+  res.redirect(302, "https://warasoft.com/seller-ai/");
 });
 
 // Called by the external scheduler (about every 5 minutes). It only starts a

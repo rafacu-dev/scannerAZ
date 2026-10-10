@@ -12,7 +12,7 @@ messages, or tax data.
 | Control | Implementation | Evidence |
 | --- | --- | --- |
 | Transport protection | Helmet security headers; production deployments must use an HTTPS `APP_BASE_URL`. | `src/server.ts` |
-| Edge DDoS and perimeter protection | `scanneraz.warasoft.com` is served through an active Cloudflare Free zone. Cloudflare provides baseline DDoS mitigation and one active custom firewall rule that blocks unsupported `CONNECT`, `TRACE`, and `TRACK` methods for ScannerAz. The paid Managed Ruleset is not enabled and must not be represented as active. Render also provides Cloudflare-backed DDoS protection. | Cloudflare custom rule `ScannerAz block unsupported HTTP methods`; `docs/production-architecture.md` |
+| Edge DDoS and perimeter protection | The public Warasoft product page is served through the active edge configuration. Cloudflare provides baseline DDoS mitigation and one active custom firewall rule that blocks unsupported `CONNECT`, `TRACE`, and `TRACK` methods. The paid Managed Ruleset is not enabled and must not be represented as active. Render also provides Cloudflare-backed DDoS protection. | Cloudflare custom rule; `docs/production-architecture.md` |
 | Edge proxy boundary | The Cloudflare Worker proxies only to the fixed `scanneraz-api.onrender.com` origin and preserves the original path and query string. It does not accept a caller-selected target. When its shared secret is configured on both sides, Render rejects direct-origin traffic other than its health probe. | `cloudflare/scanneraz-edge-proxy.js`, `src/server.ts` |
 | Request abuse protection | Amazon routes are limited to 60 requests per minute per source IP; OAuth routes to 12 requests per 15 minutes. | `src/server.ts` |
 | Security telemetry | Rejected operator authentication and rate-limit events log request, Cloudflare, and Render trace identifiers without credentials or request bodies. | `src/server.ts` |
@@ -35,7 +35,7 @@ an owner and verifiable evidence.
 - Terminate all public traffic with TLS 1.2+ and redirect HTTP to HTTPS.
 - Place the API behind a managed WAF/firewall with managed OWASP rules and a
   documented allowlist for administrative access where feasible.
-- After `scanneraz.warasoft.com` is live, disable the public `workers.dev`
+- After the public Warasoft product page is live, disable the public `workers.dev`
   endpoint for `scanneraz-edge-proxy` and use the custom hostname as the only
   intended public entry point.
 - Set the same high-entropy `SCANNERAZ_EDGE_SHARED_SECRET` as a Cloudflare

@@ -37,12 +37,12 @@ flowchart LR
   `cloudflare/scanneraz-edge-proxy.js`.
 - The Worker adds an `X-ScannerAz-Edge: cloudflare` response marker and keeps
   responses non-cacheable when the origin does not state a cache policy.
-- `scanneraz.warasoft.com` is the active public hostname for the Worker and
+- `warasoft.com/seller-ai/` is the active public product page and
   `APP_BASE_URL` on Render. The temporary `workers.dev` endpoint is disabled.
 - The `warasoft.com` zone enforces TLS 1.2 as its minimum version and redirects
   HTTP to HTTPS. It currently uses Cloudflare Free baseline DDoS protection and
   an active custom rule that blocks unsupported `CONNECT`, `TRACE`, and `TRACK`
-  methods for `scanneraz.warasoft.com`; Cloudflare's paid Managed Ruleset is
+  methods for the public Warasoft host; Cloudflare's paid Managed Ruleset is
   not active.
 - The staged Worker source redirects HTTP to HTTPS before forwarding traffic.
   This becomes an active control only after the Worker deployment and
@@ -58,7 +58,7 @@ flowchart LR
 ## Controls still required before public launch
 
 - Broaden the custom edge firewall rules or enable a managed WAF rule set, then
-  preserve evidence of active rules and alerts for `scanneraz.warasoft.com`.
+  preserve evidence of active rules and alerts for the public Warasoft host.
 - Configure alert recipients and retain monitoring evidence for edge blocks,
   account abuse, configuration changes, and anomalous errors.
 - Complete the runtime/endpoint anti-malware review with the selected hosting

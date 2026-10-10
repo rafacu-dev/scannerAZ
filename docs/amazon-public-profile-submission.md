@@ -12,7 +12,7 @@ Amazon Data Protection Policy (DPP) or Acceptable Use Policy (AUP).
 | --- | --- |
 | Organization | DRECOM LLC |
 | Country | United States |
-| Website | `https://scanneraz.warasoft.com/scanneraz/` |
+| Website | `https://warasoft.com/seller-ai/` |
 | Developer type | Public Developer |
 | Application | ScannerAz |
 | Initial roles | Product Listing; Pricing; Inventory and Order Tracking |

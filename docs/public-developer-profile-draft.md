@@ -30,7 +30,7 @@ repository.
 
 Production review URL:
 
-`https://scanneraz.warasoft.com/scanneraz/`
+`https://warasoft.com/seller-ai/`
 
 The site describes ScannerAz, DRECOM LLC, product scope, pricing, privacy,
 security, support, and data deletion. Verify every page is publicly reachable
