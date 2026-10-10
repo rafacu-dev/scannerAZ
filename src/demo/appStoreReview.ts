@@ -93,6 +93,23 @@ appStoreReviewRouter.get("/amazon/connections/:connectionId/permissions", (_req,
 appStoreReviewRouter.get("/amazon/connections/:connectionId/finances/release-calendar", (_req, res) => res.json({ connectionId, marketplaceId: "ATVPDKIKX0DER", authorizationRequired: false, generatedAt: iso(0), currency: "USD", totalPending: 412.76, days: [{ date: iso(0).slice(0, 10), amount: 412.76, currency: "USD", transactionCount: 5 }], transfers: [], preliminary: { available: true, ordersAuthorizationRequired: false, feeRate: 0.15, orderCount: 5, currency: "USD", totalPending: 412.76, days: [] } }));
 appStoreReviewRouter.get("/amazon/connections/:connectionId/returns/summary", (_req, res) => res.json({ connectionId, days: 60, authorizationRequired: false, returnedUnits: 1, returnRequests: 1, soldUnits: 17, topSkus: [{ sku: products[1].sku, asin: products[1].asin, title: products[1].title, units: 1 }], topReasons: [{ reason: "Customer return", units: 1 }], statuses: [{ status: "Completed", units: 1 }] }));
 appStoreReviewRouter.get("/agent/messages", (_req, res) => res.json({ messages: [], hasMore: false }));
+appStoreReviewRouter.post("/agent/messages", (req, res) => {
+  const text = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  const locale = req.body?.locale === "es" ? "es" : "en";
+  if (!text) {
+    res.status(400).json({ error: "Message text is required" });
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const assistantContent = locale === "es"
+    ? "Esta es una cuenta de demostración. Puedo mostrarte productos, inventario, ventas y precios de ejemplo para SellerAI."
+    : "This is a demo account. I can show you sample products, inventory, sales, and pricing for SellerAI.";
+  res.json({
+    userMessage: { id: `demo-agent-user-${Date.now()}`, role: "user", content: text, inputKind: "text", createdAt: now },
+    assistantMessage: { id: `demo-agent-assistant-${Date.now()}`, role: "assistant", content: assistantContent, inputKind: "text", createdAt: now },
+  });
+});
 
 appStoreReviewRouter.use((_req, res) => {
   res.status(409).json({ error: "This action is unavailable in the App Store review demo.", code: "demo_action_unavailable" });

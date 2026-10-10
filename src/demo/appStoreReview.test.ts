@@ -42,6 +42,15 @@ test("review account receives complete product offers without reaching live Amaz
     assert.equal(result.offers.length, 3);
     assert.ok(result.offers.every((offer) => offer.buyBoxPrice > 0 && offer.offers.length === 2));
 
+    const agentResponse = await fetch(`${base}/agent/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "Hola", locale: "es" }),
+    });
+    assert.equal(agentResponse.status, 200);
+    const agentResult = await agentResponse.json() as { assistantMessage: { content: string } };
+    assert.match(agentResult.assistantMessage.content, /demostración/);
+
     const unsupported = await fetch(`${base}/amazon/connections/app-store-review-connection/listings/pricing/match-buy-box`, { method: "POST" });
     assert.equal(unsupported.status, 409);
 
