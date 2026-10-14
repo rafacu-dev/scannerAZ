@@ -146,7 +146,9 @@ async function sendWithHostingerMailApi(
   );
 
   if (!response.ok) {
-    throw { code: `HOSTINGER_SEND_${response.status}` };
+    // Hostinger explains rejections (e.g. 422) in the body; it holds no secrets.
+    const detail = (await response.text().catch(() => "")).slice(0, 300);
+    throw { code: `HOSTINGER_SEND_${response.status}`, detail };
   }
 }
 
