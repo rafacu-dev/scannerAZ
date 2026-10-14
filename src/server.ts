@@ -311,22 +311,33 @@ function sendAmazonMobileConnectionComplete(
     mobileUrl.searchParams.set("sellerId", input.sellerId);
   }
 
-  const encodedMobileUrl = JSON.stringify(mobileUrl.toString());
+  // Redirect straight to the app scheme: the in-app auth session closes as soon
+  // as it sees it. An inline script would be blocked by the CSP (script-src
+  // 'self'), leaving the user stuck on this page; the body is only a fallback
+  // link for browsers that do not follow a redirect to a custom scheme.
+  const href = escapeHtml(mobileUrl.toString());
   res.setHeader("cache-control", "no-store, private, max-age=0");
-  res.type("html").send(`<!doctype html>
+  res.status(303).location(mobileUrl.toString()).type("html").send(`<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="referrer" content="no-referrer">
     <title>Amazon connected | SellerAI</title>
-    <style>body { align-items: center; background: #f4f6f8; color: #17202a; display: flex; font-family: Arial, sans-serif; justify-content: center; margin: 0; min-height: 100vh; } main { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; max-width: 360px; padding: 28px; text-align: center; } h1 { margin: 0 0 10px; } p { color: #687385; line-height: 1.5; margin: 0; }</style>
+    <style>body { align-items: center; background: #f4f6f8; color: #17202a; display: flex; font-family: Arial, sans-serif; justify-content: center; margin: 0; min-height: 100vh; } main { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; max-width: 360px; padding: 28px; text-align: center; } h1 { margin: 0 0 10px; } p { color: #687385; line-height: 1.5; margin: 0; } a { color: #146eb4; font-weight: bold; }</style>
   </head>
   <body>
-    <main><h1>${input.status === "connected" ? "Amazon connected" : "Connection not completed"}</h1><p>Returning to SellerAI.</p></main>
-    <script>window.location.replace(${encodedMobileUrl});</script>
+    <main><h1>${input.status === "connected" ? "Amazon connected" : "Connection not completed"}</h1><p><a href="${href}">Return to SellerAI</a></p></main>
   </body>
 </html>`);
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function isAmazonWebsiteLoginRequestError(error: unknown) {
