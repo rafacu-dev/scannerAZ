@@ -211,8 +211,30 @@ export async function exchangeAuthorizationCode(code: string): Promise<AmazonTok
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Amazon token exchange failed: ${response.status} ${body}`);
+    throw new AmazonTokenExchangeError(response.status, body);
   }
 
   return response.json() as Promise<AmazonTokenResponse>;
+}
+
+/**
+ * Login with Amazon rejected the code exchange. `oauthError` is the standard
+ * OAuth error code (e.g. invalid_client, invalid_grant), safe to log; the full
+ * response body stays in `message` and is never logged.
+ */
+export class AmazonTokenExchangeError extends Error {
+  readonly status: number;
+  readonly oauthError?: string;
+
+  constructor(status: number, body: string) {
+    super(`Amazon token exchange failed: ${status} ${body}`);
+    this.name = "AmazonTokenExchangeError";
+    this.status = status;
+    try {
+      const parsed = JSON.parse(body) as { error?: unknown };
+      this.oauthError = typeof parsed.error === "string" ? parsed.error.slice(0, 64) : undefined;
+    } catch {
+      this.oauthError = undefined;
+    }
+  }
 }

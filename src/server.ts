@@ -7,6 +7,7 @@ import helmet from "helmet";
 import { assertAmazonOAuthConfig, assertOAuthSecurityConfig, config } from "./config.js";
 import {
   type AmazonWebsiteLoginRequest,
+  AmazonTokenExchangeError,
   createAmazonWebsiteLoginRequest,
   createOAuthState,
   decodeAmazonWebsiteLoginRequest,
@@ -889,7 +890,11 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
       cfRay: req.get("cf-ray") || undefined,
       renderRequestId: req.get("rndr-id") || undefined,
       errorName: error instanceof Error ? error.name : "UnknownError",
-      errorCode: error instanceof EmailDeliveryError ? error.providerCode : undefined
+      errorCode: error instanceof EmailDeliveryError
+        ? error.providerCode
+        : error instanceof AmazonTokenExchangeError
+          ? `LWA_${error.status}_${error.oauthError ?? "unknown"}`
+          : undefined
     })
   );
 
