@@ -2621,7 +2621,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
           SELECT NULLIF(BTRIM(mappings.image_url), '')
           FROM scanneraz_inventory_asin_mappings AS mappings
           WHERE mappings.tenant_id = lines.tenant_id
-            AND mappings.asin = lines.asin
+            AND UPPER(BTRIM(mappings.asin)) = UPPER(BTRIM(lines.asin))
             AND NULLIF(BTRIM(mappings.image_url), '') IS NOT NULL
           ORDER BY mappings.updated_at DESC, mappings.upc
           LIMIT 1
@@ -2629,7 +2629,7 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
           SELECT NULLIF(BTRIM(candidate.image_url), '')
           FROM scanneraz_inventory_products AS candidate
           WHERE candidate.tenant_id = lines.tenant_id
-            AND candidate.asin = COALESCE(NULLIF(lines.asin, ''), products.asin)
+            AND UPPER(BTRIM(candidate.asin)) = UPPER(BTRIM(COALESCE(NULLIF(lines.asin, ''), products.asin)))
             AND NULLIF(BTRIM(candidate.image_url), '') IS NOT NULL
           ORDER BY candidate.updated_at DESC, candidate.id
           LIMIT 1
@@ -2651,11 +2651,11 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
         FROM scanneraz_inventory_products AS candidate
         WHERE candidate.tenant_id = lines.tenant_id
           AND (
-            (NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND candidate.asin = lines.asin)
-            OR (NULLIF(BTRIM(lines.seller_sku), '') IS NOT NULL AND candidate.sku = lines.seller_sku)
+            (NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND UPPER(BTRIM(candidate.asin)) = UPPER(BTRIM(lines.asin)))
+            OR (NULLIF(BTRIM(lines.seller_sku), '') IS NOT NULL AND UPPER(BTRIM(candidate.sku)) = UPPER(BTRIM(lines.seller_sku)))
           )
         ORDER BY
-          CASE WHEN NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND candidate.asin = lines.asin THEN 0 ELSE 1 END,
+          CASE WHEN NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND UPPER(BTRIM(candidate.asin)) = UPPER(BTRIM(lines.asin)) THEN 0 ELSE 1 END,
           candidate.updated_at DESC,
           candidate.id
         LIMIT 1
