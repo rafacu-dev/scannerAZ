@@ -49,6 +49,10 @@ projects:
               - fromGroup: scanneraz-production-runtime
               - key: APP_BASE_URL
                 value: https://scanneraz.warasoft.com
+              # Public identifier of the ScannerAz app in Developer Central. The
+              # LWA client ID and secret must come from this same app.
+              - key: AMAZON_SP_API_APP_ID
+                value: amzn1.sp.solution.b9885c76-9f7d-440c-a2bd-77e11b6cbad1
               - key: DATABASE_URL
                 fromDatabase:
                   name: scanneraz-db
