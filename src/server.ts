@@ -464,7 +464,8 @@ app.post("/auth/scanneraz/email-code", requirePublicAppAccess, emailCodeRateLimi
         console.warn(JSON.stringify({
           event: "auth.email_delivery_failed",
           requestId: res.locals.requestId,
-          providerCode: error.providerCode
+          providerCode: error.providerCode,
+          providerDetail: error.providerDetail
         }));
       }
       res.status(503).json({ error: "Email sign-in is not available yet.", code: "email_unavailable" });

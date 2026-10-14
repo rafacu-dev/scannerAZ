@@ -12,12 +12,17 @@ export class EmailUnavailableError extends Error {
 /** A configured provider that could not accept or deliver a message. */
 export class EmailDeliveryError extends Error {
   readonly providerCode?: string;
+  /** Non-secret context for the log, such as mailbox addresses. */
+  readonly providerDetail?: string;
 
   constructor(error: unknown) {
     super("Outgoing email could not be delivered");
     this.name = "EmailDeliveryError";
     this.providerCode = typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code ?? "") || undefined
+      : undefined;
+    this.providerDetail = typeof error === "object" && error !== null && "detail" in error
+      ? String((error as { detail?: unknown }).detail ?? "") || undefined
       : undefined;
   }
 }
@@ -108,7 +113,8 @@ async function sendWithHostingerMailApi(
 ) {
   const headers = {
     authorization: `Bearer ${config.HOSTINGER_MAIL_API_KEY!}`,
-    accept: "application/json"
+    accept: "application/json",
+    "user-agent": "SellerAI-Server/1.0"
   };
   const accountResponse = await fetch("https://api.mail.hostinger.com/api/v1/me", { headers });
 
@@ -123,7 +129,11 @@ async function sendWithHostingerMailApi(
   );
 
   if (!mailbox?.resourceId) {
-    throw { code: "HOSTINGER_MAILBOX_NOT_AUTHORIZED" };
+    const authorized = account.data?.mailboxes?.map((candidate) => candidate.address ?? "?").join(", ") || "none";
+    throw {
+      code: "HOSTINGER_MAILBOX_NOT_AUTHORIZED",
+      detail: `from=${fromAddress} authorized=${authorized}`
+    };
   }
 
   const response = await fetch(
