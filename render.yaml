@@ -25,9 +25,9 @@ projects:
               - key: AMAZON_OAUTH_VERSION
                 value: beta
               - key: SCANNERAZ_PUBLIC_APP_ENABLED
-                value: "false"
+                value: "true"
               - key: SCANNERAZ_PUBLIC_SIGNUP_ENABLED
-                value: "false"
+                value: "true"
               # Real price updates still require an explicit in-app confirmation after
               # Amazon validates the current listing state and the target price.
               - key: SCANNERAZ_PRICE_UPDATES_ENABLED
