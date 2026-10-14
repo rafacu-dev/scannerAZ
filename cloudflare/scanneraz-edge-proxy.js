@@ -1,4 +1,4 @@
-const ORIGIN = "https://scanneraz-api.onrender.com";
+const ORIGIN = "https://scanneraz-api-n2xe.onrender.com";
 const EDGE_SECRET_ENV = "SCANNERAZ_EDGE_SHARED_SECRET";
 
 /**
