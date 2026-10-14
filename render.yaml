@@ -4,85 +4,89 @@
 # public registration disabled until the security controls documented in
 # docs/amazon-sp-api-security-remediation.md are operating and verified.
 
-envVarGroups:
-  - name: scanneraz-production-runtime
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: DATABASE_SSL
-        value: "false"
-      # ScannerAz has an approved public developer profile. Keep the public
-      # account surface disabled until the production OAuth draft flow is
-      # tested with the registered app client and managed storage.
-      - key: AMAZON_SP_API_ENVIRONMENT
-        value: production
-      # Amazon requires the beta marker while the public application remains
-      # in Draft. Remove this variable when its Appstore listing is published.
-      - key: AMAZON_OAUTH_VERSION
-        value: beta
-      - key: SCANNERAZ_PUBLIC_APP_ENABLED
-        value: "false"
-      - key: SCANNERAZ_PUBLIC_SIGNUP_ENABLED
-        value: "false"
-      # Real price updates still require an explicit in-app confirmation after
-      # Amazon validates the current listing state and the target price.
-      - key: SCANNERAZ_PRICE_UPDATES_ENABLED
-        value: "true"
+projects:
+  - name: SellerAI
+    environments:
+      - name: production
+        envVarGroups:
+          - name: scanneraz-production-runtime
+            envVars:
+              - key: NODE_ENV
+                value: production
+              - key: DATABASE_SSL
+                value: "false"
+              # ScannerAz has an approved public developer profile. Keep the public
+              # account surface disabled until the production OAuth draft flow is
+              # tested with the registered app client and managed storage.
+              - key: AMAZON_SP_API_ENVIRONMENT
+                value: production
+              # Amazon requires the beta marker while the public application remains
+              # in Draft. Remove this variable when its Appstore listing is published.
+              - key: AMAZON_OAUTH_VERSION
+                value: beta
+              - key: SCANNERAZ_PUBLIC_APP_ENABLED
+                value: "false"
+              - key: SCANNERAZ_PUBLIC_SIGNUP_ENABLED
+                value: "false"
+              # Real price updates still require an explicit in-app confirmation after
+              # Amazon validates the current listing state and the target price.
+              - key: SCANNERAZ_PRICE_UPDATES_ENABLED
+                value: "true"
 
-services:
-  - type: web
-    name: scanneraz-api
-    runtime: node
-    repo: https://github.com/rafacu-dev/scannerAZ.git
-    branch: main
-    region: oregon
-    plan: starter
-    buildCommand: npm ci --include=dev && npm run build
-    startCommand: npm start
-    healthCheckPath: /health
-    autoDeploy: true
-    envVars:
-      - fromGroup: scanneraz-production-runtime
-      - key: APP_BASE_URL
-        value: https://scanneraz.warasoft.com
-      - key: DATABASE_URL
-        fromDatabase:
-          name: scanneraz-db
-          property: connectionString
-      # Render generates and stores these server-only values. They never belong
-      # in this repository, the Expo bundle, or an EXPO_PUBLIC_* variable.
-      - key: ENCRYPTION_KEY
-        generateValue: true
-      - key: SESSION_SECRET
-        generateValue: true
-      # Set manually in Render and mirror it as a Worker secret in Cloudflare.
-      # Do not put its value in this Blueprint or repository.
-      - key: SCANNERAZ_EDGE_SHARED_SECRET
-        sync: false
-      # Configure this server-only key in Render before invoice analysis is
-      # enabled. It reaches the provider only through the Warasoft gateway and
-      # never belongs in Expo, EAS, Cloudflare, or this repository.
-      - key: WARASOFT_AI_GATEWAY_KEY
-        sync: false
-      - key: WARASOFT_AI_GATEWAY_URL
-        value: https://warasoft.com/api/ai/v1/responses/
-      - key: WARASOFT_AI_INVOICE_MODEL
-        value: gpt-4o-mini
-      # Render Free blocks SMTP ports. Configure a scoped Hostinger Mail API
-      # token manually; the server discovers only its authorized mailbox.
-      - key: HOSTINGER_MAIL_API_KEY
-        sync: false
+        services:
+          - type: web
+            name: scanneraz-api
+            runtime: node
+            repo: https://github.com/rafacu-dev/scannerAZ.git
+            branch: main
+            region: oregon
+            plan: starter
+            buildCommand: npm ci --include=dev && npm run build
+            startCommand: npm start
+            healthCheckPath: /health
+            autoDeploy: true
+            envVars:
+              - fromGroup: scanneraz-production-runtime
+              - key: APP_BASE_URL
+                value: https://scanneraz.warasoft.com
+              - key: DATABASE_URL
+                fromDatabase:
+                  name: scanneraz-db
+                  property: connectionString
+              # Render generates and stores these server-only values. They never belong
+              # in this repository, the Expo bundle, or an EXPO_PUBLIC_* variable.
+              - key: ENCRYPTION_KEY
+                generateValue: true
+              - key: SESSION_SECRET
+                generateValue: true
+              # Set manually in Render and mirror it as a Worker secret in Cloudflare.
+              # Do not put its value in this Blueprint or repository.
+              - key: SCANNERAZ_EDGE_SHARED_SECRET
+                sync: false
+              # Configure this server-only key in Render before invoice analysis is
+              # enabled. It reaches the provider only through the Warasoft gateway and
+              # never belongs in Expo, EAS, Cloudflare, or this repository.
+              - key: WARASOFT_AI_GATEWAY_KEY
+                sync: false
+              - key: WARASOFT_AI_GATEWAY_URL
+                value: https://warasoft.com/api/ai/v1/responses/
+              - key: WARASOFT_AI_INVOICE_MODEL
+                value: gpt-4o-mini
+              # Render Free blocks SMTP ports. Configure a scoped Hostinger Mail API
+              # token manually; the server discovers only its authorized mailbox.
+              - key: HOSTINGER_MAIL_API_KEY
+                sync: false
 
-databases:
-  - name: scanneraz-db
-    databaseName: scanneraz
-    user: scanneraz
-    region: oregon
-    postgresMajorVersion: "18"
-    # Smallest paid plan: unlike free Postgres it does not expire after 30 days.
-    plan: basic-256mb
-    diskSizeGB: 1
-    storageAutoscalingEnabled: false
-    # No public database ingress: scanneraz-api connects through Render's
-    # private network using DATABASE_URL above.
-    ipAllowList: []
+        databases:
+          - name: scanneraz-db
+            databaseName: scanneraz
+            user: scanneraz
+            region: oregon
+            postgresMajorVersion: "18"
+            # Smallest paid plan: unlike free Postgres it does not expire after 30 days.
+            plan: basic-256mb
+            diskSizeGB: 1
+            storageAutoscalingEnabled: false
+            # No public database ingress: scanneraz-api connects through Render's
+            # private network using DATABASE_URL above.
+            ipAllowList: []
