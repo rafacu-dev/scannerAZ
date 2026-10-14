@@ -2614,10 +2614,10 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       SELECT
         lines.id,
         lines.connection_id,
-        COALESCE(lines.title, products.title, lines.seller_sku, lines.asin, 'Amazon sale') AS title,
-        COALESCE(products.asin, lines.asin) AS asin,
-        COALESCE(products.sku, lines.seller_sku) AS sku,
-        COALESCE(NULLIF(BTRIM(products.image_url), ''), (
+        COALESCE(lines.title, products.title, matched_product.title, lines.seller_sku, lines.asin, 'Amazon sale') AS title,
+        COALESCE(products.asin, matched_product.asin, lines.asin) AS asin,
+        COALESCE(products.sku, matched_product.sku, lines.seller_sku) AS sku,
+        COALESCE(NULLIF(BTRIM(products.image_url), ''), NULLIF(BTRIM(matched_product.image_url), ''), (
           SELECT NULLIF(BTRIM(mappings.image_url), '')
           FROM scanneraz_inventory_asin_mappings AS mappings
           WHERE mappings.tenant_id = lines.tenant_id
@@ -2646,6 +2646,20 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
       FROM ranked_sales AS lines
       LEFT JOIN scanneraz_inventory_products AS products
         ON products.id = lines.product_id AND products.tenant_id = lines.tenant_id
+      LEFT JOIN LATERAL (
+        SELECT candidate.title, candidate.image_url, candidate.asin, candidate.sku
+        FROM scanneraz_inventory_products AS candidate
+        WHERE candidate.tenant_id = lines.tenant_id
+          AND (
+            (NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND candidate.asin = lines.asin)
+            OR (NULLIF(BTRIM(lines.seller_sku), '') IS NOT NULL AND candidate.sku = lines.seller_sku)
+          )
+        ORDER BY
+          CASE WHEN NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND candidate.asin = lines.asin THEN 0 ELSE 1 END,
+          candidate.updated_at DESC,
+          candidate.id
+        LIMIT 1
+      ) AS matched_product ON TRUE
       WHERE lines.row_number = 1
         AND COALESCE(lines.order_created_at, lines.updated_at) >= NOW() - ($2::integer * INTERVAL '1 day')
       ORDER BY COALESCE(lines.order_created_at, lines.updated_at) DESC, lines.created_at DESC
