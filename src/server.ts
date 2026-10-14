@@ -283,7 +283,7 @@ function renderAmazonWebsiteLoginError() {
   return `<!doctype html>
 <html lang="en">
   <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connection expired | ScannerAz</title></head>
-  <body><main><h1>Connection request expired</h1><p>Return to ScannerAz and start the Amazon connection again.</p></main></body>
+  <body><main><h1>Connection request expired</h1><p>Return to SellerAI and start the Amazon connection again.</p></main></body>
 </html>`;
 }
 
@@ -291,7 +291,7 @@ function renderAmazonMobileHandoffError() {
   return `<!doctype html>
 <html lang="en">
   <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connection expired | ScannerAz</title></head>
-  <body><main><h1>Connection request expired</h1><p>Return to ScannerAz and begin the Amazon connection again.</p></main></body>
+  <body><main><h1>Connection request expired</h1><p>Return to SellerAI and begin the Amazon connection again.</p></main></body>
 </html>`;
 }
 
@@ -318,11 +318,11 @@ function sendAmazonMobileConnectionComplete(
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="referrer" content="no-referrer">
-    <title>Amazon connected | ScannerAz</title>
+    <title>Amazon connected | SellerAI</title>
     <style>body { align-items: center; background: #f4f6f8; color: #17202a; display: flex; font-family: Arial, sans-serif; justify-content: center; margin: 0; min-height: 100vh; } main { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; max-width: 360px; padding: 28px; text-align: center; } h1 { margin: 0 0 10px; } p { color: #687385; line-height: 1.5; margin: 0; }</style>
   </head>
   <body>
-    <main><h1>${input.status === "connected" ? "Amazon connected" : "Connection not completed"}</h1><p>Returning to ScannerAz.</p></main>
+    <main><h1>${input.status === "connected" ? "Amazon connected" : "Connection not completed"}</h1><p>Returning to SellerAI.</p></main>
     <script>window.location.replace(${encodedMobileUrl});</script>
   </body>
 </html>`);
