@@ -54,7 +54,8 @@ import {
   resolveInventoryAsinMappings,
   resolveInventoryReturn,
   saveInvoiceExtraction,
-  type InventoryCondition
+  type InventoryCondition,
+  type InventorySaleRecord
 } from "./store.js";
 import { syncAmazonSalesForConnection } from "./amazonSalesSync.js";
 
@@ -212,7 +213,9 @@ inventoryRouter.get("/overview", async (req, res, next) => {
 inventoryRouter.get("/sales", async (req, res, next) => {
   try {
     const days = Number(req.query.days ?? 90);
-    res.json({ sales: await listInventorySales(requireTenantId(req), Number.isFinite(days) ? days : 90) });
+    const tenantId = requireTenantId(req);
+    const sales = await listInventorySales(tenantId, Number.isFinite(days) ? days : 90);
+    res.json({ sales: await attachMissingSaleImages(tenantId, sales) });
   } catch (error) {
     next(error);
   }
@@ -346,6 +349,74 @@ async function attachMissingProductImages(
   } catch {
     return overview;
   }
+}
+
+const saleImageCache = new Map<string, { imageUrl?: string; expiresAt: number }>();
+const saleImageCacheTtlMs = 60 * 60 * 1000;
+const missingSaleImageCacheTtlMs = 10 * 60 * 1000;
+
+async function attachMissingSaleImages(tenantId: string, sales: InventorySaleRecord[]) {
+  const missing = sales.filter((sale) =>
+    !sale.imageUrl && sale.asin && /^[A-Z0-9]{10}$/i.test(sale.asin.trim())
+  );
+  if (!missing.length) return sales;
+
+  const images = new Map<string, string>();
+  const now = Date.now();
+  const byConnection = new Map<string, Set<string>>();
+  for (const sale of missing) {
+    const asin = sale.asin!.trim().toUpperCase();
+    const key = `${tenantId}:${sale.connectionId}:${asin}`;
+    const cached = saleImageCache.get(key);
+    if (cached && cached.expiresAt > now) {
+      if (cached.imageUrl) images.set(key, cached.imageUrl);
+      continue;
+    }
+    const asins = byConnection.get(sale.connectionId) ?? new Set<string>();
+    asins.add(asin);
+    byConnection.set(sale.connectionId, asins);
+  }
+
+  // The newest missing sales come first. Keep catalog requests bounded per load.
+  let remaining = 20;
+  for (const [connectionId, asins] of byConnection) {
+    if (remaining <= 0) break;
+    const batch = [...asins].slice(0, remaining);
+    remaining -= batch.length;
+    try {
+      const connection = await getAmazonConnectionForTenant(connectionId, tenantId);
+      if (!connection) continue;
+      const marketplaceId = connection.marketplaceId || config.AMAZON_MARKETPLACE_ID;
+      const response = await searchCatalogItems({
+        identifiers: batch,
+        identifierType: "ASIN",
+        refreshToken: connection.refreshToken,
+        marketplaceId,
+        limit: batch.length,
+      });
+      const found = new Map(normalizeCatalogSearchResponse(response, marketplaceId)
+        .filter((candidate) => Boolean(candidate.imageUrl))
+        .map((candidate) => [candidate.asin.toUpperCase(), candidate.imageUrl!] as const));
+      for (const asin of batch) {
+        const imageUrl = found.get(asin);
+        const key = `${tenantId}:${connectionId}:${asin}`;
+        saleImageCache.set(key, {
+          imageUrl,
+          expiresAt: now + (imageUrl ? saleImageCacheTtlMs : missingSaleImageCacheTtlMs),
+        });
+        if (imageUrl) images.set(key, imageUrl);
+      }
+    } catch {
+      // Catalog access may be unavailable for one connection; return sales normally.
+    }
+  }
+
+  if (saleImageCache.size > 5000) saleImageCache.clear();
+  return sales.map((sale) => {
+    if (sale.imageUrl || !sale.asin) return sale;
+    const imageUrl = images.get(`${tenantId}:${sale.connectionId}:${sale.asin.trim().toUpperCase()}`);
+    return imageUrl ? { ...sale, imageUrl } : sale;
+  });
 }
 
 inventoryRouter.post("/product-links", async (req, res, next) => {
