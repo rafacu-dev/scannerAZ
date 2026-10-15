@@ -2653,9 +2653,19 @@ export async function listInventorySales(tenantId: string, days = 90): Promise<I
           AND (
             (NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND UPPER(BTRIM(candidate.asin)) = UPPER(BTRIM(lines.asin)))
             OR (NULLIF(BTRIM(lines.seller_sku), '') IS NOT NULL AND UPPER(BTRIM(candidate.sku)) = UPPER(BTRIM(lines.seller_sku)))
+            OR (
+              NULLIF(BTRIM(lines.title), '') IS NOT NULL
+              AND NULLIF(BTRIM(candidate.title), '') IS NOT NULL
+              AND REGEXP_REPLACE(LOWER(BTRIM(candidate.title)), '[^a-z0-9]+', '', 'g')
+                = REGEXP_REPLACE(LOWER(BTRIM(lines.title)), '[^a-z0-9]+', '', 'g')
+            )
           )
         ORDER BY
-          CASE WHEN NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND UPPER(BTRIM(candidate.asin)) = UPPER(BTRIM(lines.asin)) THEN 0 ELSE 1 END,
+          CASE
+            WHEN NULLIF(BTRIM(lines.asin), '') IS NOT NULL AND UPPER(BTRIM(candidate.asin)) = UPPER(BTRIM(lines.asin)) THEN 0
+            WHEN NULLIF(BTRIM(lines.seller_sku), '') IS NOT NULL AND UPPER(BTRIM(candidate.sku)) = UPPER(BTRIM(lines.seller_sku)) THEN 1
+            ELSE 2
+          END,
           candidate.updated_at DESC,
           candidate.id
         LIMIT 1
