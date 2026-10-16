@@ -82,7 +82,7 @@ projects:
                 sync: false
               # The Hostinger token must be scoped to this exact mailbox.
               - key: EMAIL_FROM
-                value: SellerAI <no-replay@warasoft.com>
+                value: SellerAI <no-reply@warasoft.com>
 
         databases:
           - name: scanneraz-db
