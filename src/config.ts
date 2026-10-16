@@ -72,13 +72,21 @@ const envSchema = z.object({
     .transform((value) => (value === undefined ? undefined : value === "true")),
   SMTP_USER: blankAsUndefined(z.string().trim().min(1).optional()),
   SMTP_PASS: blankAsUndefined(z.string().min(1).optional()),
+  // Sender shared by every Warasoft service through the "Warasoft Transactional
+  // Email" group. EMAIL_FROM is kept only as a legacy fallback.
+  EMAIL_FROM_ADDRESS: blankAsUndefined(z.string().trim().min(3).optional()),
   EMAIL_FROM: blankAsUndefined(z.string().trim().min(3).default("SellerAI <no-reply@warasoft.com>")),
   // Render Free blocks outbound SMTP. This bearer token calls Hostinger Mail
   // over HTTPS and must remain a Render-only secret.
   HOSTINGER_MAIL_API_KEY: blankAsUndefined(z.string().min(1).optional())
 });
 
-export const config = envSchema.parse(process.env);
+const parsedConfig = envSchema.parse(process.env);
+
+export const config = {
+  ...parsedConfig,
+  EMAIL_FROM: parsedConfig.EMAIL_FROM_ADDRESS ?? parsedConfig.EMAIL_FROM
+};
 
 export function assertAmazonLwaConfig() {
   const missing = [
